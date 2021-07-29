@@ -10,9 +10,7 @@ let dimy = 100
 (* Bigarray representation. *)
 
 module Pixmap = struct
-  let get_pixel pixmap x y =
-    let pxmp, dimx, _ = pixmap in
-    Array1.get pxmp ((x * dimx) + y)
+  let get_pixel (pxmp, dimx, _) x y = Array1.get pxmp ((x * dimx) + y)
 end
 
 (* To PNG functions (from school project). *)
@@ -56,7 +54,7 @@ let plot_line pxmp x0 y0 x1 y1 =
   let sx = if x0 < x1 then 1 else -1 in
   let dy = -1 * abs (y1 - y0) in
   let sy = if y0 < y1 then 1 else -1 in
-  let err = 0 in
+  let err = dx + dy in
 
   let rec loop x y err =
     plot pxmp x y;
@@ -86,7 +84,7 @@ let rec render pxmp vg_img =
     | `Earc _ -> Printf.printf "  ->`Earc\n"
     | `Close -> Printf.printf "  ->`Close\n"
   in
-  (* NOTE: I think the continuation style (or at least using states) is needed
+  (* NOTE: I think the continuation passing style (or at least using states) is needed
      to go further. *)
   match vg_img with
   | Primitive _ -> Printf.printf "Primitive\n"
@@ -100,7 +98,7 @@ let rec render pxmp vg_img =
 
 let () =
   let vg_img =
-    let line = P.empty |> P.line (P2.v 50. 50.) in
+    let line = P.empty |> P.line (P2.v 5. 25.) |> P.line (P2.v 25. 50.) in
     (* let circle = P.empty |> P.circle (P2.v 0.5 0.5) 0.4 in *)
     (* let area = `O { P.o with P.width = 0.04 } in *)
     let black = I.const Color.black in
