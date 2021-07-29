@@ -1,0 +1,7 @@
+(executable
+ (name main)
+ (public_name proto)
+ (libraries proto gg vg vg.svg bimage bimage-unix bigarray)
+ (flags (:standard -open StdLabels)))
+
+(include_subdirs unqualified)

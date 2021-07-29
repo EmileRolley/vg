@@ -1,0 +1,21 @@
+(lang dune 2.0)
+(name proto)
+(documentation "https://EmileRolley.github.io/proto/")
+(source (github EmileRolley/proto))
+(license MIT)
+(authors "Emile Rolley")
+(maintainers "Emile Rolley")
+
+(generate_opam_files true)
+
+(package
+ (name proto)
+ (synopsis "A custom bitmap renderer protoype for Vg.image")
+ (description "\
+A custom bitmap renderer protoype for Vg.image
+")
+ (depends
+  (ocaml (>= 4.08.0))
+  (dune (>= 2.0))
+  (alcotest :with-test)
+  (odoc :with-doc)))
