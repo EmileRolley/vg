@@ -43,7 +43,7 @@ dev: ## Install development dependencies
 
 .PHONY: build
 build: ## Build the project, including non installable libraries and executables
-	opam exec -- dune build --root .
+	opam exec -- dune build --profile release --root .
 
 .PHONY: install
 install: all ## Install the packages on the system

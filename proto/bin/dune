@@ -1,7 +1,11 @@
 (executable
- (name main)
- (public_name proto)
- (libraries gg vg vg.svg bimage bimage-unix bigarray)
- (flags (:standard -open StdLabels)))
+  (name main)
+  (public_name proto)
+  (modules main)
+  (libraries gg vg vgr_raster bimage bimage-unix bigarray)
+  (flags (:standard -open StdLabels)))
 
-(include_subdirs unqualified)
+(library
+  (name vgr_raster)
+  (modules vgr_raster)
+  (libraries gg vg bigarray))
