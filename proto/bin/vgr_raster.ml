@@ -3,13 +3,7 @@ open Vgr
 open Gg
 open Bigarray
 
-let red = 255 * 65536
-
 let w = ref 0
-
-let plot raster color = Array1.set raster color
-
-let plot_red raster = plot raster red
 
 (** Algorithm from:
 
@@ -27,7 +21,7 @@ let plot_line raster x0 y0 x1 y1 =
   let rec loop x y err =
     Printf.printf "(%d, %d)\n" x y;
     (* FIXME: index out of bounds. *)
-    plot_red raster ((x * !w) + y);
+    raster.{(x * !w) + y} <- 255.;
 
     if x = x1 && y = y1 then ()
     else
