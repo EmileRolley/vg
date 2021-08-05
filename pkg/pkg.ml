@@ -34,6 +34,7 @@ let () =
   Ok [
     Pkg.mllib "src/vg.mllib";
     Pkg.mllib "src/vgr_svg.mllib";
+    Pkg.mllib "src/vgr_bitmap.mllib";
     Pkg.mllib ~cond:vgr_pdf "src/vgr_pdf.mllib";
     Pkg.mllib ~cond:jsoo "src/vgr_htmlc.mllib";
     Pkg.mllib ~cond:cairo2 "src/vgr_cairo.mllib";

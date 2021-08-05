@@ -17,6 +17,17 @@ package "svg" (
   exists_if = "vgr_svg.cma"
 )
 
+package "bitmap" (
+  version = "%%VERSION%%"
+  description = "Vg bitmap renderer"
+  requires = "vg"
+  archive(byte) = "vgr_bitmap.cma"
+  archive(native) = "vgr_bitmap.cmxa"
+  plugin(byte) = "vgr_bitmap.cma"
+  plugin(native) = "vgr_bitmap.cmxs"
+  exists_if = "vgr_bitmap.cma"
+)
+
 package "pdf" (
   version = "%%VERSION%%"
   description = "Vg's PDF renderer"

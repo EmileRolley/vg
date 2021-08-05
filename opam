@@ -1,6 +1,9 @@
 opam-version: "2.0"
+name: "vg"
+synopsis: "Declarative 2D vector graphics for OCaml"
+description: "Declarative 2D vector graphics for OCaml"
 maintainer: "Daniel Bünzli <daniel.buenzl i@erratique.ch>"
-homepage: "https://erratique.ch/software/vg"
+homepage: "hratique.ch/software/vg"
 authors: ["The vg programmers"]
 doc: "https://erratique.ch/software/vg/doc/Vg"
 dev-repo: "git+https://erratique.ch/repos/vg.git"

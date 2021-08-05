@@ -8,3 +8,5 @@ tmp
 *.native
 *.byte
 *.install
+*.ocamlformat*
+META
