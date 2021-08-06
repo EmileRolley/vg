@@ -4,38 +4,87 @@
    %%NAME%% %%VERSION%%
   ---------------------------------------------------------------------------*)
 
-open Bigarray
 open Gg
 open Vg
 open Vgr
 module P = Private
 
-type render_fun_input = [ `End | `Image of size2 * box2 * P.Data.image ]
+module type BitmapType = sig
+  type t
 
-type r_state = {
-  (* Current path being built. *)
-  path : v2 list list;
-  (* Current cursor position. *)
-  curr : v2;
-  (* Stores the rendered {{!Vg.image}} *)
-  bitmap : (float, float32_elt, c_layout) Array1.t;
-}
-(** Render state. NOTE: this should not be exposed. *)
+  val create : int -> int -> t
 
-let render_target (_ : P.renderer) (_ : [< dst ]) : bool * P.render_fun =
-  let render v k r =
-    match v with
-    | `End ->
-        Printf.printf "In `End\n";
-        k r
-    | `Image (size, view, i) ->
-        Printf.printf "In `Image\n";
-        I.pp (Format.formatter_of_out_channel stdout) (P.I.of_data i);
-        k r
-  in
-  (false, render)
+  val get : t -> float -> float -> Gg.Color.t
 
-let target () = Vgr.Private.create_target render_target
+  val set : t -> float -> float -> Gg.Color.t -> unit
+
+  val width : t -> int
+
+  val height : t -> int
+end
+
+module F32_ba : BitmapType = struct
+  open Ba
+
+  type t =
+    (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t
+    * int
+    * int
+
+  let stride = 4
+
+  let get_i x y h =
+    let x' = int_of_float x in
+    let y' = int_of_float y in
+    ((x' * h) + y') * stride
+
+  let create w h = (Ba.create Ba.Float32 (w * h * stride), w, h)
+
+  let get (b, _, h) x y =
+    let v_rgba = get_i x y h |> Ba.get_v4 b in
+    V4.(Color.v (x v_rgba) (y v_rgba) (z v_rgba) (w v_rgba)) |> Color.of_srgb
+
+  let set (b, _, h) x y c = Ba.set_v4 b (get_i x y h) c
+
+  let width (_, w, _) = w
+
+  let height (_, _, h) = h
+end
+
+module type S = sig
+  type bitmap
+
+  val target : bitmap -> [ `Other ] Vg.Vgr.target
+end
+
+module Make (Bitmap : BitmapType) = struct
+  type bitmap = Bitmap.t
+
+  type r_state = {
+    (* Current path being built. *)
+    path : v2 list list;
+    (* Current cursor position. *)
+    curr : v2;
+    (* Stores the rendered {{!Vg.image}} *)
+    bitmap : bitmap;
+  }
+
+  let render_target (_bitmap : bitmap) (_ : P.renderer) (_ : [< dst ]) :
+      bool * P.render_fun =
+    let render v k r =
+      match v with
+      | `End ->
+          Printf.printf "In `End\n";
+          k r
+      | `Image (size, view, i) ->
+          Printf.printf "In `Image\n";
+          I.pp (Format.formatter_of_out_channel stdout) (P.I.of_data i);
+          k r
+    in
+    (false, render)
+
+  let target bitmap = Vgr.Private.create_target (render_target bitmap)
+end
 
 (*---------------------------------------------------------------------------
    Copyright (c) 2014 The vg programmers

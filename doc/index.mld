@@ -6,4 +6,4 @@ See the {{!Vg.basics}basics} for an introduction.
 
 {1:api API}
 
-{!modules: Vg Vgr_cairo Vgr_htmlc Vgr_pdf Vgr_svg}
+{!modules: Vg Vgr_cairo Vgr_htmlc Vgr_pdf Vgr_svg Vgr_bitmap}
