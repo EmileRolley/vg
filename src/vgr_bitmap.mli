@@ -30,10 +30,10 @@ module type BitmapType = sig
   (** [set bitmap x y c] must update the [bitmap] by associated the [c] color
       to the pixel with coordinates ([x], [y]). *)
 
-  val width : t -> int
-  (** [width bitmap] must return the width of the represented image by the [bitmap]. *)
+  val w : t -> int
+  (** [w bitmap] must return the width of the represented image by the [bitmap]. *)
 
-  val height : t -> int
+  val h : t -> int
   (** [width bitmap] must return the height of the represented image by the [bitmap]. *)
 end
 
@@ -64,7 +64,7 @@ where:
 module type S = sig
   type bitmap
 
-  val target : bitmap -> [ `Other ] Vg.Vgr.target
+  val target : bitmap -> float -> [ `Other ] Vg.Vgr.target
   (** [target state]. *)
 end
 
