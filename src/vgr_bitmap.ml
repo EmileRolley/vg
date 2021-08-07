@@ -57,7 +57,7 @@ end
 module type S = sig
   type bitmap
 
-  val target : bitmap -> float -> [ `Other ] Vg.Vgr.target
+  val target : bitmap -> [ `Other ] Vg.Vgr.target
 end
 
 module Make (Bitmap : BitmapType) = struct
@@ -82,7 +82,6 @@ module Make (Bitmap : BitmapType) = struct
     (* Current path being built. *)
     size : size2;
     scaling : float;
-    res : float;
     mutable path : p2 list list;
     (* Current cursor position. *)
     mutable curr : p2;
@@ -113,35 +112,54 @@ module Make (Bitmap : BitmapType) = struct
     List.iter (fun pt -> Printf.printf "(%f, %f); " (P2.x pt) (P2.y pt)) segs;
     Printf.printf "\n"
 
+  let spf = Printf.sprintf
+
+  let log = Printf.printf "\t[LOG] %s\n"
+
   (** image view rect in current coordinate system. *)
   let view_rect s =
     let tr = M3.inv s.gstate.g_tr in
     Pv.Data.of_path (P.empty |> P.rect (Box2.tr tr s.view))
+
+  (* Convenient functions for coordinate conversions. *)
+
+  let to_int_coords (x : float) (y : float) : int * int =
+    (int_of_float x, int_of_float y)
+
+  let to_float_coords (x : int) (y : int) : float * float =
+    (float_of_int x, float_of_int y)
+
+  let get_curr_int_coords (s : state) : int * int =
+    to_int_coords (P2.x s.curr) (P2.y s.curr)
+
+  let get_scaled_coords (s : state) (x : float) (y : float) : float * float =
+    (s.scaling *. x, s.scaling *. y)
+
+  let get_int_scaled_coords (s : state) (x : float) (y : float) : int * int =
+    to_int_coords (s.scaling *. x) (s.scaling *. y)
 
   (* Render functions.
 
      They follow the same design that for other renderers such as [Vgr_cairo]
      or [Vgr_htmlc] in order to stay consistent. *)
 
-  (* let flip_y (y : float) (h : int) : float = float_of_int h -. y *)
-
+  (** [move_to s x y] update the current position to \([x], [y]\). TODO: this
+      should open a new sub-path. *)
   let move_to (s : state) (x : float) (y : float) : unit = s.curr <- P2.v x y
 
-  (* FIXME: lineplotting + yflipping. *)
-  (* NOTE: yflipping is not the priority for now I think. *)
+  (** [line_to s x y] adds a line to the path from the current point to position
+      \([x], [y]\) scaled by [s.scaling]. After this call the current point will
+      be \([x], [y]\). *)
   let line_to (s : state) (x : float) (y : float) : unit =
-    let plot_line segs x0 y0 x1 y1 =
+    let bresenham_line segs x0 y0 x1 y1 =
       (* Algorithm from: https://en.wikipedia.org/wiki/Bresenham's_line_algorithm *)
-      let open Int in
-      let dx = abs (x1 - x0) in
+      let dx = Int.abs (x1 - x0) in
       let sx = if x0 < x1 then 1 else -1 in
       let dy = -1 * abs (y1 - y0) in
       let sy = if y0 < y1 then 1 else -1 in
       let err = dx + dy in
 
       let rec loop segs x y err =
-        Printf.printf "plot: (%d, %d)\n" x y;
-
         if x = x1 && y = y1 then segs
         else
           let e2 = 2 * err in
@@ -153,41 +171,36 @@ module Make (Bitmap : BitmapType) = struct
       in
       loop segs x0 y0 err
     in
-    (* NOTE: find a way to reduce int <-> float convesions. *)
-    let x0 = P2.x s.curr |> int_of_float in
-    let y0 = P2.y s.curr |> int_of_float in
-    let x1 = int_of_float (x *. s.scaling) in
-    let y1 = int_of_float (y *. s.scaling) in
-    s.path <- plot_line [ s.curr ] x0 y0 x1 y1 :: s.path
+    let x0, y0 = get_curr_int_coords s in
+    let x1, y1 = get_scaled_coords s x y in
+    s.curr <- P2.v x1 y1;
+    let x1, y1 = to_int_coords x1 y1 in
+    s.path <- bresenham_line [ s.curr ] x0 y0 x1 y1 :: s.path
 
-  (* TODO: need to find out how to manage the [view] and the [size]. *)
-  let is_in_view (_x : float) (_y : float) (_view : box2) : bool =
-    (* Box2.(x >= minx view && x <= maxx view && y >= miny view && y <= maxy view) *)
-    true
+  (** [is_in_view s x y] for now, verifies that (x, y) are valid coordinates for
+      the [s.bitmap]. TODO: need to find out how to manage the [view] and the
+      [size]. *)
+  let is_in_view (s : state) (x : float) (y : float) : bool =
+    let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
+    x >= 0. && x <= w && y >= 0. && y <= h
 
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
-  let stroke (s : state) : unit =
+  let r_stroke (s : state) : unit =
     let draw (pt : p2) : unit =
       let x = P2.x pt in
       let y = P2.y pt in
       let c = s.gstate.g_stroke in
-      if Color.void <> c && is_in_view x y s.view then (
-        Printf.printf "stroke: (%f, %f)\n" x y;
-        B.set s.bitmap x y c)
+      if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
     in
-    Printf.printf "view (w: %f, h: %f)\n" (Box2.w s.view) (Box2.h s.view);
-    List.iter
-      (fun s ->
-        pp_segs s;
-        Printf.printf "\n")
-      s.path;
     List.iter (List.iter draw) s.path
 
   let set_path (s : state) (p : Pv.Data.path) : unit =
     let open P2 in
     s.path <- [ [] ];
     let add_segment : Pv.Data.segment -> unit = function
-      | `Sub pt -> move_to s (x pt) (y pt)
+      | `Sub pt ->
+          let x, y = get_scaled_coords s (x pt) (y pt) in
+          move_to s x y
       | `Line pt -> line_to s (x pt) (y pt)
       | `Qcurve (c, pt) ->
           failwith "quadratic_curve_to (x c) (y c) (x pt) (y pt))"
@@ -208,7 +221,7 @@ module Make (Bitmap : BitmapType) = struct
       | `Close -> failwith "close_path s"
     in
     pp_path p;
-    List.iter add_segment p
+    List.rev p |> List.iter add_segment
 
   let set_stroke s = function
     | Pv.Data.Const c -> s.gstate.g_stroke <- c
@@ -221,7 +234,7 @@ module Make (Bitmap : BitmapType) = struct
         | `O o ->
             s.gstate.g_outline <- o;
             set_stroke s p;
-            stroke s
+            r_stroke s
         | `Aeo | `Anz -> failwith "TODO")
     | _ -> failwith "TODO"
 
@@ -259,12 +272,10 @@ module Make (Bitmap : BitmapType) = struct
               warn s (`Other "TODO: support transformations.");
               r_image s k r)
 
-  let create_state
-      (b : bitmap) (res : float) (s : size2) (view : box2) (r : Pv.renderer) :
+  let create_state (b : bitmap) (s : size2) (view : box2) (r : Pv.renderer) :
       state =
     {
       r;
-      res;
       view;
       bitmap = b;
       (* NOTE: need to find out why this needs to be the height instead of the
@@ -285,8 +296,7 @@ module Make (Bitmap : BitmapType) = struct
         };
     }
 
-  let render_target
-      (bitmap : bitmap) (res : float) (_ : Pv.renderer) (_ : [< dst ]) :
+  let render_target (bitmap : bitmap) (_ : Pv.renderer) (_ : [< dst ]) :
       bool * Pv.render_fun =
     let render v k r =
       match v with
@@ -296,14 +306,13 @@ module Make (Bitmap : BitmapType) = struct
       | `Image (size, view, i) ->
           Printf.printf "Start to render:\n";
           pp_img i;
-          let s = create_state bitmap res size view r in
+          let s = create_state bitmap size view r in
           s.todo <- [ Draw i ];
           r_image s k r
     in
     (false, render)
 
-  (* NOTE: Maybe needs to get the res too. *)
-  let target bitmap res = Pv.create_target (render_target bitmap res)
+  let target bitmap = Pv.create_target (render_target bitmap)
 end
 
 (*---------------------------------------------------------------------------

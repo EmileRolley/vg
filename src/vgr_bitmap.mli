@@ -8,11 +8,8 @@
 
 (** {1 Generic bitmap interface} *)
 
-(**
-   [BitmapType] is a generic interface allowing to use custom [bitmap]
-   implementations.
-   (For provided one, see {!providedtype}).
-*)
+(** [BitmapType] is a generic interface allowing to use custom [bitmap]
+    implementations. (For provided one, see {!providedtype}). *)
 module type BitmapType = sig
   type t
   (** [t] is the type of the bitmap implementation used to store a rasterized
@@ -27,44 +24,45 @@ module type BitmapType = sig
       coordinates ([x], [y]). *)
 
   val set : t -> float -> float -> Gg.Color.t -> unit
-  (** [set bitmap x y c] must update the [bitmap] by associated the [c] color
-      to the pixel with coordinates ([x], [y]). *)
+  (** [set bitmap x y c] must update the [bitmap] by associated the [c] color to
+      the pixel with coordinates ([x], [y]). *)
 
   val w : t -> int
   (** [w bitmap] must return the width of the represented image by the [bitmap]. *)
 
   val h : t -> int
-  (** [width bitmap] must return the height of the represented image by the [bitmap]. *)
+  (** [width bitmap] must return the height of the represented image by the
+      [bitmap]. *)
 end
 
 (** {2:providedtype Provided bitmap implementations} *)
 
 module F32_ba : BitmapType
-(** Default {!BitmapType} implementation using a {!Gg.Ba} (linear {!Bigarray}). *)
+(** Provided {!BitmapType} implementation using a {!Gg.Ba.Float32} (linear
+    {!Bigarray}). *)
 
-(**
-   RGBa color channels of a pixel are stored in a row:
-{v
+(** RGBa color channels of a pixel are stored in a row:
+
+    {v
  0        1        2        3        4           (x*w+y)*c
  +--------+--------+--------+--------+--------+-------+--------+---
  | (0,0)  | (0,0)  | (0,0)  | (0,0)  | (0,1)  |  ...  | (x,y)  |
  |      r |      g |      b |      a |      r |       |      r |
  +--------+--------+--------+--------+--------+-------+--------+---
-v}
+    v}
 
-where:
-    {ul
-    {- [w] is the image width}
-    {- [h] is the image height}
-    {- [c] is the number of color channel}}
-*)
+    where:
+
+    - [w] is the image width
+    - [h] is the image height
+    - [c] is the number of color channel *)
 
 (** {1:target Bitmap render targets} *)
 
 module type S = sig
   type bitmap
 
-  val target : bitmap -> float -> [ `Other ] Vg.Vgr.target
+  val target : bitmap -> [ `Other ] Vg.Vgr.target
   (** [target state]. *)
 end
 
