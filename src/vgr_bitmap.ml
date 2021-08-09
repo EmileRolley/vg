@@ -9,6 +9,24 @@ open Vg
 open Vgr
 module Pv = Private
 
+(** Temporary debugging functions. *)
+module Debug = struct
+  let pp_img i = Printf.printf "Image: %s\n" @@ I.to_string @@ Pv.I.of_data i
+
+  let pp_path p = Printf.printf "Path: %s\n" @@ P.to_string @@ Pv.P.of_data p
+
+  let pp_segs segs =
+    Printf.printf "Seg: ";
+    List.iter (fun pt -> Printf.printf "(%f, %f); " (P2.x pt) (P2.y pt)) segs;
+    Printf.printf "\n"
+
+  let spf = Printf.sprintf
+
+  let log = Printf.printf "\t[LOG] %s\n"
+end
+
+module D = Debug
+
 module type BitmapType = sig
   type t
 
@@ -60,34 +78,86 @@ module type S = sig
   val target : bitmap -> [ `Other ] Vg.Vgr.target
 end
 
+(** [Stroker] contains all the algorithm implementations in order to calculates
+    coordinates of points of mathematical 2D graphics primitives shuch as lines
+    or Bézier curves.
+
+    All point coordinates used by the following functions are assumed to be
+    scaled (see {!state.scaling}). ) *)
+module Stroker = struct
+  (** [bresenham_line pts x0 y0 x1 y1] adds all the calculated points of the
+      line from ([x0], [y0]) to ([x1], [y1]) to [pts].
+
+      The Bresenham's line algorithm is used (see
+      https://en.wikipedia.org/wiki/Bresenham's_line_algorithm) *)
+  let bresenham_line (pts : v2 list) (x0 : int) (y0 : int) (x1 : int) (y1 : int)
+      : v2 list =
+    let dx = abs (x1 - x0) in
+    let sx = if x0 < x1 then 1 else -1 in
+    let dy = -1 * abs (y1 - y0) in
+    let sy = if y0 < y1 then 1 else -1 in
+    let err = dx + dy in
+
+    let rec loop pts x y err =
+      if x = x1 && y = y1 then pts
+      else
+        let e2 = 2 * err in
+        let err = if e2 >= dy then err + dy else err in
+        let x = if e2 >= dy then x + sx else x in
+        let err = if e2 <= dx then err + dx else err in
+        let y = if e2 <= dx then y + sy else y in
+        loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
+    in
+    loop pts x0 y0 err
+end
+
 module Make (Bitmap : BitmapType) = struct
   module B = Bitmap
 
   type bitmap = B.t
 
+  (** Represents all points of a sub-path which must be drawn. *)
+  type subpath = {
+    (* All points that needs to be drawn in the bitmap. *)
+    segs : p2 list list;
+    (* Beginning of the sub-path. *)
+    start : p2 option;
+    (* Tracks the current state of the sub-path: is it closed or not? *)
+    closed : bool;
+  }
+
+  (** Graphical state of the renderer. *)
   type gstate = {
     mutable g_tr : M3.t;
+    (* Current path outline. *)
     mutable g_outline : P.outline;
+    (* Current stroking color.  *)
     mutable g_stroke : Color.t;
+    (* Current filling color.  *)
     mutable g_fill : Color.t;
   }
 
+  (** Commands to perform. *)
   type cmd = Set of gstate | Draw of Pv.Data.image
 
-  (* TODO: fill the doc. *)
+  (** State of the renderer. *)
   type state = {
     r : Pv.renderer;
     (* Stores the rendered {{!Vg.image}} *)
     bitmap : bitmap;
     (* Current path being built. *)
     size : size2;
+    (* Constant used to convert Vg point coordinates into rasterized ones. *)
     scaling : float;
-    mutable path : p2 list list;
+    (* Points of the current path being calculated. *)
+    mutable path : subpath list;
     (* Current cursor position. *)
     mutable curr : p2;
     mutable cost : int;
     mutable view : box2;
+    (* List of remaining commands to perform. *)
     mutable todo : cmd list;
+    (* Graphical state. *)
     mutable gstate : gstate;
   }
 
@@ -100,21 +170,6 @@ module Make (Bitmap : BitmapType) = struct
   let warn s w = Vgr.Private.warn s.r w
 
   let image i = Vgr.Private.I.of_data i
-
-  (* Temporary debug functions. *)
-
-  let pp_img i = Printf.printf "Image: %s\n" @@ I.to_string @@ Pv.I.of_data i
-
-  let pp_path p = Printf.printf "Path: %s\n" @@ P.to_string @@ Pv.P.of_data p
-
-  let pp_segs segs =
-    Printf.printf "Seg: ";
-    List.iter (fun pt -> Printf.printf "(%f, %f); " (P2.x pt) (P2.y pt)) segs;
-    Printf.printf "\n"
-
-  let spf = Printf.sprintf
-
-  let log = Printf.printf "\t[LOG] %s\n"
 
   (** image view rect in current coordinate system. *)
   let view_rect s =
@@ -143,39 +198,53 @@ module Make (Bitmap : BitmapType) = struct
      They follow the same design that for other renderers such as [Vgr_cairo]
      or [Vgr_htmlc] in order to stay consistent. *)
 
-  (** [move_to s x y] update the current position to \([x], [y]\). TODO: this
-      should open a new sub-path. *)
-  let move_to (s : state) (x : float) (y : float) : unit = s.curr <- P2.v x y
+  let empty_subpath : subpath = { segs = []; start = None; closed = false }
+
+  let get_current_subpath (s : state) : subpath option = List.nth_opt s.path 0
+
+  (** [move_to s x y] updates the current position to ([x], [y]) and opan a new
+      sub-path starting at ([x], [y]). *)
+  let move_to (s : state) (x : float) (y : float) : unit =
+    s.curr <- P2.v x y;
+    s.path <- { empty_subpath with start = Some s.curr } :: s.path
+
+  (** [close_path s] Adds a line segment to the current path being built from
+      the current point to the beginning of the current sub-path before closing
+      it. After this call the current point will be at the joined endpoint of
+      the sub-path.
+
+      If there is no current point before the call to [close_path], this
+      function will have no effect. *)
+  let close_path (s : state) : unit =
+    let close curr_sp start =
+      let x0, y0 = get_curr_int_coords s in
+      let x1, y1 = to_int_coords (P2.x start) (P2.y start) in
+      let r_line_pts = Stroker.bresenham_line [ s.curr ] x0 y0 x1 y1 in
+      s.curr <- start;
+      s.path <-
+        (match s.path with
+        | [] -> [ { curr_sp with segs = [ r_line_pts ]; closed = true } ]
+        | segs :: tl ->
+            { curr_sp with segs = r_line_pts :: curr_sp.segs; closed = true }
+            :: tl)
+    in
+    Option.iter
+      (fun curr_sp -> Option.iter (close curr_sp) curr_sp.start)
+      (get_current_subpath s)
 
   (** [line_to s x y] adds a line to the path from the current point to position
-      \([x], [y]\) scaled by [s.scaling]. After this call the current point will
-      be \([x], [y]\). *)
+      ([x], [y]) scaled by [s.scaling]. After this call the current point will
+      be ([x], [y]). *)
   let line_to (s : state) (x : float) (y : float) : unit =
-    let bresenham_line segs x0 y0 x1 y1 =
-      (* Algorithm from: https://en.wikipedia.org/wiki/Bresenham's_line_algorithm *)
-      let dx = Int.abs (x1 - x0) in
-      let sx = if x0 < x1 then 1 else -1 in
-      let dy = -1 * abs (y1 - y0) in
-      let sy = if y0 < y1 then 1 else -1 in
-      let err = dx + dy in
-
-      let rec loop segs x y err =
-        if x = x1 && y = y1 then segs
-        else
-          let e2 = 2 * err in
-          let err = if e2 >= dy then err + dy else err in
-          let x = if e2 >= dy then x + sx else x in
-          let err = if e2 <= dx then err + dx else err in
-          let y = if e2 <= dx then y + sy else y in
-          loop (P2.v (float_of_int x) (float_of_int y) :: segs) x y err
-      in
-      loop segs x0 y0 err
-    in
     let x0, y0 = get_curr_int_coords s in
     let x1, y1 = get_scaled_coords s x y in
-    s.curr <- P2.v x1 y1;
-    let x1, y1 = to_int_coords x1 y1 in
-    s.path <- bresenham_line [ s.curr ] x0 y0 x1 y1 :: s.path
+    let x1', y1' = to_int_coords x1 y1 in
+    let r_line_pts = Stroker.bresenham_line [ s.curr ] x0 y0 x1' y1' in
+    s.path <-
+      (match s.path with
+      | [] -> [ { segs = [ r_line_pts ]; start = Some s.curr; closed = false } ]
+      | sp :: tl -> { sp with segs = r_line_pts :: sp.segs } :: tl);
+    s.curr <- P2.v x1 y1
 
   (** [is_in_view s x y] for now, verifies that (x, y) are valid coordinates for
       the [s.bitmap]. TODO: need to find out how to manage the [view] and the
@@ -186,17 +255,18 @@ module Make (Bitmap : BitmapType) = struct
 
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
   let r_stroke (s : state) : unit =
-    let draw (pt : p2) : unit =
+    let draw_point pt =
       let x = P2.x pt in
       let y = P2.y pt in
       let c = s.gstate.g_stroke in
       if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
     in
-    List.iter (List.iter draw) s.path
+    let draw_subpath sp = List.iter (List.iter draw_point) sp.segs in
+    List.iter draw_subpath s.path
 
+  (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
     let open P2 in
-    s.path <- [ [] ];
     let add_segment : Pv.Data.segment -> unit = function
       | `Sub pt ->
           let x, y = get_scaled_coords s (x pt) (y pt) in
@@ -218,15 +288,17 @@ module Make (Bitmap : BitmapType) = struct
                       |> restore
                   )*)
           ()
-      | `Close -> failwith "close_path s"
+      | `Close -> close_path s
     in
-    pp_path p;
+    D.pp_path p;
     List.rev p |> List.iter add_segment
 
-  let set_stroke s = function
+  (** [set_stroke s] updates [s.gstate] according to a given Vg primitive. *)
+  let set_stroke (s : state) : Pv.Data.primitive -> unit = function
     | Pv.Data.Const c -> s.gstate.g_stroke <- c
     | Axial _ | Radial _ | Raster _ -> failwith "TODO"
 
+  (** [r_cut s a] renders a cut image. *)
   let rec r_cut (s : state) (a : P.area) : Pv.Data.image -> unit = function
     | Primitive (Raster _) -> assert false
     | Primitive p -> (
@@ -238,7 +310,9 @@ module Make (Bitmap : BitmapType) = struct
         | `Aeo | `Anz -> failwith "TODO")
     | _ -> failwith "TODO"
 
-  let rec r_image s k r =
+  (** [r_image s k r] renders a Vg image. *)
+  let rec r_image (s : state) (k : Pv.k) (r : Pv.renderer) : [ `Ok | `Partial ]
+      =
     if s.cost > limit s then (
       s.cost <- 0;
       partial (r_image s k) r)
@@ -272,18 +346,19 @@ module Make (Bitmap : BitmapType) = struct
               warn s (`Other "TODO: support transformations.");
               r_image s k r)
 
-  let create_state (b : bitmap) (s : size2) (view : box2) (r : Pv.renderer) :
-      state =
+  (** [create_state b s v r] creates a initial state. *)
+  let create_state (b : bitmap) (s : size2) (v : box2) (r : Pv.renderer) : state
+      =
     {
       r;
-      view;
+      view = v;
       bitmap = b;
       (* NOTE: need to find out why this needs to be the height instead of the
          minimum between the height and the width or just the width.
          + This probably will be replace by a transformation matrix. *)
       scaling = B.h b |> float_of_int;
       size = s;
-      path = [ [] ];
+      path = [];
       curr = P2.o;
       cost = 0;
       todo = [];
@@ -300,12 +375,9 @@ module Make (Bitmap : BitmapType) = struct
       bool * Pv.render_fun =
     let render v k r =
       match v with
-      | `End ->
-          Printf.printf "The rendering is over.\n";
-          k r
+      | `End -> k r
       | `Image (size, view, i) ->
-          Printf.printf "Start to render:\n";
-          pp_img i;
+          D.pp_img i;
           let s = create_state bitmap size view r in
           s.todo <- [ Draw i ];
           r_image s k r

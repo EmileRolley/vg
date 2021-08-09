@@ -11,9 +11,9 @@
 (** [BitmapType] is a generic interface allowing to use custom [bitmap]
     implementations. (For provided one, see {!providedtype}). *)
 module type BitmapType = sig
-  type t
   (** [t] is the type of the bitmap implementation used to store a rasterized
       {!Vg.image}*)
+  type t
 
   val create : int -> int -> t
   (** [create w h] must return an initialized bitmap corresponding to an image
@@ -37,14 +37,14 @@ end
 
 (** {2:providedtype Provided bitmap implementations} *)
 
-module F32_ba : BitmapType
 (** Provided {!BitmapType} implementation using a {!Gg.Ba.Float32} (linear
     {!Bigarray}). *)
+module F32_ba : BitmapType
 
 (** RGBa color channels of a pixel are stored in a row:
 
     {v
- 0        1        2        3        4           (x*w+y)*c
+ 0        1        2        3        4           (x*h+y)*c
  +--------+--------+--------+--------+--------+-------+--------+---
  | (0,0)  | (0,0)  | (0,0)  | (0,0)  | (0,1)  |  ...  | (x,y)  |
  |      r |      g |      b |      a |      r |       |      r |
