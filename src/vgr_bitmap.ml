@@ -182,7 +182,7 @@ module Make (Bitmap : BitmapType) = struct
       [size]. *)
   let is_in_view (s : state) (x : float) (y : float) : bool =
     let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
-    x >= 0. && x <= w && y >= 0. && y <= h
+    x >= 0. && x < w && y >= 0. && y < h
 
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
   let r_stroke (s : state) : unit =
