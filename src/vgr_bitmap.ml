@@ -83,6 +83,39 @@ let to_int_coords (x : float) (y : float) : int * int =
 let to_float_coords (x : int) (y : int) : float * float =
   (float_of_int x, float_of_int y)
 
+(** Extends the [Box2] module by adding a folding function. *)
+module Box2 = struct
+  include Box2
+
+  (** [fold f acc b] is a classical left folding function on [box2]. *)
+  let fold (f : 'a -> int -> int -> 'a) (acc : 'a) (b : box2) : 'a =
+    let minx = Box2.minx b |> int_of_float in
+    let miny = Box2.miny b |> int_of_float in
+    let maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1 in
+    let maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
+    let rec loop acc x y =
+      if x = maxx && y = maxy then acc
+      else
+        let acc = f acc x y in
+        if x = maxx then loop acc minx (y + 1) else loop acc (x + 1) y
+    in
+    loop acc minx miny
+
+  (** [iter f b] is a classical itering function on [box2]. *)
+  let iter (f : 'int -> int -> unit) (b : box2) : 'a =
+    let minx = Box2.minx b |> int_of_float in
+    let miny = Box2.miny b |> int_of_float in
+    let maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1 in
+    let maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
+    let rec loop x y =
+      if x = maxx && y = maxy then ()
+      else (
+        f x y;
+        if x = maxx then loop minx (y + 1) else loop (x + 1) y)
+    in
+    loop minx miny
+end
+
 (** [Stroker] contains all the algorithm implementations in order to calculates
     coordinates of points of mathematical 2D graphics primitives shuch as lines
     or Bézier curves.
@@ -115,33 +148,12 @@ module Stroker = struct
     loop [] x0 y0 err
 end
 
-(** [Filler] contains all the algorithm implementations to determines
+(** [Filler_rule] contains all the algorithm implementations to determines
     coordinates of points inside a path.
-
-    TODO: clean this shit.
 
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
-module Filler = struct
-  (** Extends the [Box2] module by adding a folding function. *)
-  module Box2 = struct
-    include Box2
-
-    (** [fold f acc b] is a classical left folding function on [box2]. *)
-    let fold (f : 'a -> int -> int -> 'a) (acc : 'a) (b : box2) : 'a =
-      let minx = Box2.minx b |> int_of_float in
-      let miny = Box2.miny b |> int_of_float in
-      let maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1 in
-      let maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
-      let rec loop acc x y =
-        if x = maxx && y = maxy then acc
-        else
-          let acc = f acc x y in
-          if x = maxx then loop acc minx (y + 1) else loop acc (x + 1) y
-      in
-      loop acc minx miny
-  end
-
+module Filler_rule = struct
   (** [even_odd x y pts] is the implementation of the even-odd rule algorithm. *)
   let even_odd (x : int) (y : int) (pts : p2 list list list) : bool =
     let open List in
@@ -167,19 +179,6 @@ module Filler = struct
   (** [non_zero x y pts] is the implementation of the non-zero rule algorithm. *)
   let non_zero (x : int) (y : int) (pts : p2 list list list) : bool =
     failwith "TODO"
-
-  (** [to_fill r pts view] returns all the points of the [view] which are inside
-      the path composed of [pts] according the given filling rule [r]. *)
-  let to_fill (r : [< `Aeo | `Anz ]) (pts : p2 list list list) (view : box2) :
-      p2 list =
-    let is_inside = match r with `Anz -> non_zero | `Aeo -> even_odd in
-    Box2.fold
-      (fun acc x y ->
-        if is_inside x y pts then
-          let x, y = to_float_coords x y in
-          P2.v x y :: acc
-        else acc)
-      [] view
 end
 
 module Make (Bitmap : BitmapType) = struct
@@ -237,7 +236,6 @@ module Make (Bitmap : BitmapType) = struct
     (* Graphical state. *)
     mutable gstate : gstate;
   }
-
   (* Convenient functions. TODO: this could be factorized with the other renderers. *)
 
   let partial = Pv.partial
@@ -381,22 +379,27 @@ module Make (Bitmap : BitmapType) = struct
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r].
 
-      PERF: Instead of querying all the points to fill with [Filler.to_fill],
-      they could be drawn in the fly with a [Filler.fill]. *)
+      PERF: very basic algorithm which needs to be seriously improved to be
+      really functional. *)
   let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
-    let pts = List.fold_left (fun acc s -> s.segs :: acc) [] s.path in
-    let pts_to_draw =
-      Filler.to_fill r pts
-        (Box2.v P2.o
-           (P2.v (float_of_int (B.w s.bitmap)) (float_of_int (B.h s.bitmap))))
-    in
-    let draw_point pt =
-      let x = P2.x pt in
-      let y = P2.y pt in
-      let c = s.gstate.g_fill in
-      if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
-    in
-    List.iter draw_point pts_to_draw
+    let c = s.gstate.g_fill in
+    if Color.void <> c then
+      let view =
+        Box2.v P2.o
+          (P2.v (float_of_int (B.w s.bitmap)) (float_of_int (B.h s.bitmap)))
+      in
+      let pts = List.fold_left (fun acc s -> s.segs :: acc) [] s.path in
+      let is_inside =
+        match r with
+        | `Anz -> Filler_rule.non_zero
+        | `Aeo -> Filler_rule.even_odd
+      in
+      Box2.iter
+        (fun x y ->
+          if is_inside x y pts then
+            let x, y = to_float_coords x y in
+            B.set s.bitmap x y c)
+        view
 
   (** [r_cut s a] renders a cut image. *)
   let rec r_cut (s : state) (a : P.area) : Pv.Data.image -> unit = function
