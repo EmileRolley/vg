@@ -22,7 +22,7 @@ module Debug = struct
 
   let spf = Printf.sprintf
 
-  let log = Printf.printf "\t[LOG] %s\n"
+  let log ?(s = "LOG") = Printf.printf "\t[%s] %s\n" s
 end
 
 module D = Debug
@@ -32,9 +32,9 @@ module type BitmapType = sig
 
   val create : int -> int -> t
 
-  val get : t -> float -> float -> Gg.Color.t
+  val get : t -> float -> float -> Gg.color
 
-  val set : t -> float -> float -> Gg.Color.t -> unit
+  val set : t -> float -> float -> Gg.color -> unit
 
   val w : t -> int
 
@@ -61,9 +61,7 @@ module F32_ba : BitmapType = struct
     Ba.fill ba 1.;
     (ba, w, h)
 
-  let get (b, _, h) x y =
-    let v_rgba = get_i x y h |> Ba.get_v4 b in
-    V4.(Color.v (x v_rgba) (y v_rgba) (z v_rgba) (w v_rgba)) |> Color.of_srgb
+  let get (b, _, h) x y = Ba.get_v4 b (get_i x y h)
 
   let set (b, _, h) x y c = Ba.set_v4 b (get_i x y h) c
 
@@ -78,6 +76,13 @@ module type S = sig
   val target : bitmap -> [ `Other ] Vg.Vgr.target
 end
 
+(* TODO: find a better location. *)
+let to_int_coords (x : float) (y : float) : int * int =
+  (int_of_float x, int_of_float y)
+
+let to_float_coords (x : int) (y : int) : float * float =
+  (float_of_int x, float_of_int y)
+
 (** [Stroker] contains all the algorithm implementations in order to calculates
     coordinates of points of mathematical 2D graphics primitives shuch as lines
     or Bézier curves.
@@ -85,13 +90,12 @@ end
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
 module Stroker = struct
-  (** [bresenham_line pts x0 y0 x1 y1] adds all the calculated points of the
-      line from ([x0], [y0]) to ([x1], [y1]) to [pts].
+  (** [bresenham_line x0 y0 x1 y1] adds all the calculated points of the line
+      from ([x0], [y0]) to ([x1], [y1]) to [pts].
 
       The Bresenham's line algorithm is used (see
       https://en.wikipedia.org/wiki/Bresenham's_line_algorithm) *)
-  let bresenham_line (pts : v2 list) (x0 : int) (y0 : int) (x1 : int) (y1 : int)
-      : v2 list =
+  let bresenham_line (x0 : int) (y0 : int) (x1 : int) (y1 : int) : p2 list =
     let dx = abs (x1 - x0) in
     let sx = if x0 < x1 then 1 else -1 in
     let dy = -1 * abs (y1 - y0) in
@@ -108,7 +112,74 @@ module Stroker = struct
         let y = if e2 <= dx then y + sy else y in
         loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
     in
-    loop pts x0 y0 err
+    loop [] x0 y0 err
+end
+
+(** [Filler] contains all the algorithm implementations to determines
+    coordinates of points inside a path.
+
+    TODO: clean this shit.
+
+    All point coordinates used by the following functions are assumed to be
+    scaled (see {!state.scaling}). ) *)
+module Filler = struct
+  (** Extends the [Box2] module by adding a folding function. *)
+  module Box2 = struct
+    include Box2
+
+    (** [fold f acc b] is a classical left folding function on [box2]. *)
+    let fold (f : 'a -> int -> int -> 'a) (acc : 'a) (b : box2) : 'a =
+      let minx = Box2.minx b |> int_of_float in
+      let miny = Box2.miny b |> int_of_float in
+      let maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1 in
+      let maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
+      let rec loop acc x y =
+        if x = maxx && y = maxy then acc
+        else
+          let acc = f acc x y in
+          if x = maxx then loop acc minx (y + 1) else loop acc (x + 1) y
+      in
+      loop acc minx miny
+  end
+
+  (** [even_odd x y pts] is the implementation of the even-odd rule algorithm. *)
+  let even_odd (x : int) (y : int) (pts : p2 list list list) : bool =
+    let open List in
+    let is_in_pts x y =
+      pts
+      |> exists @@ exists
+         @@ exists (fun pt ->
+                let ptx', pty' = to_int_coords (P2.x pt) (P2.y pt) in
+                ptx' = x && pty' = y)
+    in
+    let is_crossing =
+      exists (fun pt ->
+          let ptx, pty = to_int_coords (P2.x pt) (P2.y pt) in
+          ptx < x && pty = y && not (is_in_pts x y))
+    in
+    let count =
+      fold_left
+        (fold_left (fun acc sp -> if is_crossing sp then acc + 1 else acc))
+        0 pts
+    in
+    count mod 2 = 1
+
+  (** [non_zero x y pts] is the implementation of the non-zero rule algorithm. *)
+  let non_zero (x : int) (y : int) (pts : p2 list list list) : bool =
+    failwith "TODO"
+
+  (** [to_fill r pts view] returns all the points of the [view] which are inside
+      the path composed of [pts] according the given filling rule [r]. *)
+  let to_fill (r : [< `Aeo | `Anz ]) (pts : p2 list list list) (view : box2) :
+      p2 list =
+    let is_inside = match r with `Anz -> non_zero | `Aeo -> even_odd in
+    Box2.fold
+      (fun acc x y ->
+        if is_inside x y pts then
+          let x, y = to_float_coords x y in
+          P2.v x y :: acc
+        else acc)
+      [] view
 end
 
 module Make (Bitmap : BitmapType) = struct
@@ -118,7 +189,13 @@ module Make (Bitmap : BitmapType) = struct
 
   (** Represents all points of a sub-path which must be drawn. *)
   type subpath = {
-    (* All points that needs to be drawn in the bitmap. *)
+    (* All points that needs to be drawn in the bitmap.
+
+       NOTE: A dimension should be removed to be coherent with the semantics.
+       Do we really need to store distinctly segments of sub-paths?
+       PERF: To test with 'big' images and compare different data structures
+       such as Hashtbl..
+    *)
     segs : p2 list list;
     (* Beginning of the sub-path. *)
     start : p2 option;
@@ -132,9 +209,9 @@ module Make (Bitmap : BitmapType) = struct
     (* Current path outline. *)
     mutable g_outline : P.outline;
     (* Current stroking color.  *)
-    mutable g_stroke : Color.t;
+    mutable g_stroke : Gg.color;
     (* Current filling color.  *)
-    mutable g_fill : Color.t;
+    mutable g_fill : Gg.color;
   }
 
   (** Commands to perform. *)
@@ -178,12 +255,6 @@ module Make (Bitmap : BitmapType) = struct
 
   (* Convenient functions for coordinate conversions. *)
 
-  let to_int_coords (x : float) (y : float) : int * int =
-    (int_of_float x, int_of_float y)
-
-  let to_float_coords (x : int) (y : int) : float * float =
-    (float_of_int x, float_of_int y)
-
   let get_curr_int_coords (s : state) : int * int =
     to_int_coords (P2.x s.curr) (P2.y s.curr)
 
@@ -219,7 +290,7 @@ module Make (Bitmap : BitmapType) = struct
     let close curr_sp start =
       let x0, y0 = get_curr_int_coords s in
       let x1, y1 = to_int_coords (P2.x start) (P2.y start) in
-      let r_line_pts = Stroker.bresenham_line [ s.curr ] x0 y0 x1 y1 in
+      let r_line_pts = Stroker.bresenham_line x0 y0 x1 y1 in
       s.curr <- start;
       s.path <-
         (match s.path with
@@ -239,30 +310,12 @@ module Make (Bitmap : BitmapType) = struct
     let x0, y0 = get_curr_int_coords s in
     let x1, y1 = get_scaled_coords s x y in
     let x1', y1' = to_int_coords x1 y1 in
-    let r_line_pts = Stroker.bresenham_line [ s.curr ] x0 y0 x1' y1' in
+    let r_line_pts = Stroker.bresenham_line x0 y0 x1' y1' in
     s.path <-
       (match s.path with
       | [] -> [ { segs = [ r_line_pts ]; start = Some s.curr; closed = false } ]
       | sp :: tl -> { sp with segs = r_line_pts :: sp.segs } :: tl);
     s.curr <- P2.v x1 y1
-
-  (** [is_in_view s x y] for now, verifies that (x, y) are valid coordinates for
-      the [s.bitmap]. TODO: need to find out how to manage the [view] and the
-      [size]. *)
-  let is_in_view (s : state) (x : float) (y : float) : bool =
-    let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
-    x >= 0. && x < w && y >= 0. && y < h
-
-  (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
-  let r_stroke (s : state) : unit =
-    let draw_point pt =
-      let x = P2.x pt in
-      let y = P2.y pt in
-      let c = s.gstate.g_stroke in
-      if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
-    in
-    let draw_subpath sp = List.iter (List.iter draw_point) sp.segs in
-    List.iter draw_subpath s.path
 
   (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
@@ -290,13 +343,60 @@ module Make (Bitmap : BitmapType) = struct
           ()
       | `Close -> close_path s
     in
-    D.pp_path p;
     List.rev p |> List.iter add_segment
 
-  (** [set_stroke s] updates [s.gstate] according to a given Vg primitive. *)
-  let set_stroke (s : state) : Pv.Data.primitive -> unit = function
-    | Pv.Data.Const c -> s.gstate.g_stroke <- c
+  let get_primitive : Pv.Data.primitive -> color = function
+    | Pv.Data.Const c -> c
     | Axial _ | Radial _ | Raster _ -> failwith "TODO"
+
+  (** [set_stroke s] updates [s.gstate] according to a given Vg primitive. *)
+  let set_stroke (s : state) (p : Pv.Data.primitive) : unit =
+    s.gstate.g_stroke <- get_primitive p
+
+  (** [set_fill s] updates [s.gstate] according to a given Vg primitive. *)
+  let set_fill (s : state) (p : Pv.Data.primitive) : unit =
+    s.gstate.g_fill <- get_primitive p
+
+  (** [is_in_view s x y] for now, verifies that (x, y) are valid coordinates for
+      the [s.bitmap]. TODO: need to find out how to manage the [view] and the
+      [size].
+
+      PERF: This test should be done before adding points the [s.path] instead
+      of checking before drawing. => less memory usage. *)
+  let is_in_view (s : state) (x : float) (y : float) : bool =
+    let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
+    x >= 0. && x < w && y >= 0. && y < h
+
+  (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
+  let r_stroke (s : state) : unit =
+    let draw_point pt =
+      let x = P2.x pt in
+      let y = P2.y pt in
+      let c = s.gstate.g_stroke in
+      if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
+    in
+    let draw_subpath sp = List.iter (List.iter draw_point) sp.segs in
+    List.iter draw_subpath s.path
+
+  (** [r_fill r s] fills all the points inside [s.path] according to the given
+      filling rule [r].
+
+      PERF: Instead of querying all the points to fill with [Filler.to_fill],
+      they could be drawn in the fly with a [Filler.fill]. *)
+  let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
+    let pts = List.fold_left (fun acc s -> s.segs :: acc) [] s.path in
+    let pts_to_draw =
+      Filler.to_fill r pts
+        (Box2.v P2.o
+           (P2.v (float_of_int (B.w s.bitmap)) (float_of_int (B.h s.bitmap))))
+    in
+    let draw_point pt =
+      let x = P2.x pt in
+      let y = P2.y pt in
+      let c = s.gstate.g_fill in
+      if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
+    in
+    List.iter draw_point pts_to_draw
 
   (** [r_cut s a] renders a cut image. *)
   let rec r_cut (s : state) (a : P.area) : Pv.Data.image -> unit = function
@@ -307,7 +407,9 @@ module Make (Bitmap : BitmapType) = struct
             s.gstate.g_outline <- o;
             set_stroke s p;
             r_stroke s
-        | `Aeo | `Anz -> failwith "TODO")
+        | (`Anz | `Aeo) as a ->
+            set_fill s p;
+            r_fill a s)
     | _ -> failwith "TODO"
 
   (** [r_image s k r] renders a Vg image. *)
@@ -355,7 +457,7 @@ module Make (Bitmap : BitmapType) = struct
       bitmap = b;
       (* NOTE: need to find out why this needs to be the height instead of the
          minimum between the height and the width or just the width.
-         + This probably will be replace by a transformation matrix. *)
+         + This probably should be replaced by a transformation matrix. *)
       scaling = B.h b |> float_of_int;
       size = s;
       path = [];

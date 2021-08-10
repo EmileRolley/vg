@@ -19,11 +19,11 @@ module type BitmapType = sig
   (** [create w h] must return an initialized bitmap corresponding to an image
       with a width of [w] and a height of [h]. *)
 
-  val get : t -> float -> float -> Gg.Color.t
+  val get : t -> float -> float -> Gg.color
   (** [get bitmap x y] must return the color of the stored pixel with
       coordinates ([x], [y]). *)
 
-  val set : t -> float -> float -> Gg.Color.t -> unit
+  val set : t -> float -> float -> Gg.color -> unit
   (** [set bitmap x y c] must update the [bitmap] by associated the [c] color to
       the pixel with coordinates ([x], [y]). *)
 
