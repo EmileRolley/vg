@@ -52,8 +52,7 @@ module F32_ba : BitmapType = struct
   let stride = 4
 
   let get_i x y h =
-    let x' = int_of_float x in
-    let y' = int_of_float y in
+    let x' = int_of_float x and y' = int_of_float y in
     ((x' * h) + y') * stride
 
   let create w h =
@@ -89,10 +88,10 @@ module Box2 = struct
 
   (** [fold f acc b] is a classical left folding function on [box2]. *)
   let fold (f : 'a -> int -> int -> 'a) (acc : 'a) (b : box2) : 'a =
-    let minx = Box2.minx b |> int_of_float in
-    let miny = Box2.miny b |> int_of_float in
-    let maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1 in
-    let maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
+    let minx = Box2.minx b |> int_of_float
+    and miny = Box2.miny b |> int_of_float
+    and maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1
+    and maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
     let rec loop acc x y =
       if x = maxx && y = maxy then acc
       else
@@ -103,10 +102,10 @@ module Box2 = struct
 
   (** [iter f b] is a classical itering function on [box2]. *)
   let iter (f : 'int -> int -> unit) (b : box2) : 'a =
-    let minx = Box2.minx b |> int_of_float in
-    let miny = Box2.miny b |> int_of_float in
-    let maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1 in
-    let maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
+    let minx = Box2.minx b |> int_of_float
+    and miny = Box2.miny b |> int_of_float
+    and maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1
+    and maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
     let rec loop x y =
       if x = maxx && y = maxy then ()
       else (
@@ -129,10 +128,10 @@ module Stroker = struct
       The Bresenham's line algorithm is used (see
       https://en.wikipedia.org/wiki/Bresenham's_line_algorithm) *)
   let bresenham_line (x0 : int) (y0 : int) (x1 : int) (y1 : int) : p2 list =
-    let dx = abs (x1 - x0) in
-    let sx = if x0 < x1 then 1 else -1 in
-    let dy = -1 * abs (y1 - y0) in
-    let sy = if y0 < y1 then 1 else -1 in
+    let dx = abs (x1 - x0)
+    and sx = if x0 < x1 then 1 else -1
+    and dy = -1 * abs (y1 - y0)
+    and sy = if y0 < y1 then 1 else -1 in
     let err = dx + dy in
 
     let rec loop pts x y err =
@@ -146,6 +145,40 @@ module Stroker = struct
         loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
     in
     loop [] x0 y0 err
+
+  (** [cubic_bezier ?nb_line p1x p1y c1x c1y c2x c2y p2x p2y] returns all the
+      points needed to be connected by a line in order to approach a Bézier
+      curve.
+
+      [nb_line] determines in how many lines the curve is approximated.
+
+      Algorithm from here:
+      https://rosettacode.org/wiki/Bitmap/B%C3%A9zier_curves/Cubic#C *)
+  let cubic_bezier
+      ?(nb_line = 20.)
+      (p1x : float)
+      (p1y : float)
+      (c1x : float)
+      (c1y : float)
+      (c2x : float)
+      (c2y : float)
+      (p2x : float)
+      (p2y : float) : p2 list =
+    let rec loop acc t =
+      if t > nb_line then acc
+      else
+        let t' = t /. nb_line in
+        let a = (1. -. t') ** 3.
+        and b = 3. *. t' *. ((1. -. t') ** 2.)
+        and c = 3. *. (t' ** 2.) *. (1. -. t')
+        and d = t' ** 3. in
+        let x, y =
+          ( (a *. p1x) +. (b *. c1x) +. (c *. c2x) +. (d *. p2x),
+            (a *. p1y) +. (b *. c1y) +. (c *. c2y) +. (d *. p2y) )
+        in
+        loop (P2.v x y :: acc) (t +. 1.)
+    in
+    loop [] 0.
 end
 
 (** [Filler_rule] contains all the algorithm implementations to determines
@@ -154,7 +187,10 @@ end
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
 module Filler_rule = struct
-  (** [even_odd x y pts] is the implementation of the even-odd rule algorithm. *)
+  (** [even_odd x y pts] is the implementation of the even-odd rule algorithm.
+
+      PERF: very basic algorithm which needs to be seriously improved to be
+      really functional. -> using Lwt_list? *)
   let even_odd (x : int) (y : int) (pts : p2 list list list) : bool =
     let open List in
     let is_in_pts x y =
@@ -277,6 +313,14 @@ module Make (Bitmap : BitmapType) = struct
     s.curr <- P2.v x y;
     s.path <- { empty_subpath with start = Some s.curr } :: s.path
 
+  (** [add_path_points s pts] add [pts] to the current path and if it's empty,
+      begins a new one starting at [s.curr]. *)
+  let add_path_points (s : state) (pts : p2 list) : unit =
+    s.path <-
+      (match s.path with
+      | [] -> [ { empty_subpath with segs = [ pts ]; start = Some s.curr } ]
+      | sp :: tl -> { sp with segs = pts :: sp.segs } :: tl)
+
   (** [close_path s] Adds a line segment to the current path being built from
       the current point to the beginning of the current sub-path before closing
       it. After this call the current point will be at the joined endpoint of
@@ -286,16 +330,11 @@ module Make (Bitmap : BitmapType) = struct
       function will have no effect. *)
   let close_path (s : state) : unit =
     let close curr_sp start =
-      let x0, y0 = get_curr_int_coords s in
-      let x1, y1 = to_int_coords (P2.x start) (P2.y start) in
+      let x0, y0 = get_curr_int_coords s
+      and x1, y1 = to_int_coords (P2.x start) (P2.y start) in
       let r_line_pts = Stroker.bresenham_line x0 y0 x1 y1 in
       s.curr <- start;
-      s.path <-
-        (match s.path with
-        | [] -> [ { curr_sp with segs = [ r_line_pts ]; closed = true } ]
-        | segs :: tl ->
-            { curr_sp with segs = r_line_pts :: curr_sp.segs; closed = true }
-            :: tl)
+      add_path_points s r_line_pts
     in
     Option.iter
       (fun curr_sp -> Option.iter (close curr_sp) curr_sp.start)
@@ -308,40 +347,64 @@ module Make (Bitmap : BitmapType) = struct
     let x0, y0 = get_curr_int_coords s in
     let x1, y1 = get_scaled_coords s x y in
     let x1', y1' = to_int_coords x1 y1 in
-    let r_line_pts = Stroker.bresenham_line x0 y0 x1' y1' in
-    s.path <-
-      (match s.path with
-      | [] -> [ { segs = [ r_line_pts ]; start = Some s.curr; closed = false } ]
-      | sp :: tl -> { sp with segs = r_line_pts :: sp.segs } :: tl);
+    Stroker.bresenham_line x0 y0 x1' y1' |> add_path_points s;
     s.curr <- P2.v x1 y1
+
+  let bezier_curve_to
+      (s : state)
+      (cx : float)
+      (cy : float)
+      (cx' : float)
+      (cy' : float)
+      (ptx : float)
+      (pty : float) : unit =
+    let p1x, p1y = (P2.x s.curr, P2.y s.curr)
+    and cx, cy = get_scaled_coords s cx cy
+    and cx', cy' = get_scaled_coords s cx' cy'
+    and p2x, p2y = get_scaled_coords s ptx pty in
+    let to_line =
+      Stroker.cubic_bezier p1x p1y cx cy cx' cy' p2x p2y |> List.rev
+    in
+    let r_line_pts = ref [] in
+    ignore
+      (List.fold_left
+         (fun prev pt ->
+           if prev = pt then pt
+           else
+             let x0, y0 = to_int_coords (P2.x prev) (P2.y prev)
+             and x1, y1 = to_int_coords (P2.x pt) (P2.y pt) in
+             r_line_pts := Stroker.bresenham_line x0 y0 x1 y1 @ !r_line_pts;
+             pt)
+         (List.hd to_line) to_line);
+    s.curr <- P2.v p2x p2y;
+    add_path_points s !r_line_pts
 
   (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
     let open P2 in
-    let add_segment : Pv.Data.segment -> unit = function
-      | `Sub pt ->
-          let x, y = get_scaled_coords s (x pt) (y pt) in
-          move_to s x y
-      | `Line pt -> line_to s (x pt) (y pt)
-      | `Qcurve (c, pt) ->
-          failwith "quadratic_curve_to (x c) (y c) (x pt) (y pt))"
-      | `Ccurve (c, c', pt) ->
-          failwith "bezier_curve_to (x c) (y c) (x c') (y c') (x pt) (y pt)"
-      | `Earc (large, cw, r, a, pt) ->
-          (*( match Vgr.Private.P.earc_params last large cw r a pt with
-                  | None -> line_to (x pt) (y pt)
-                  | Some (c, m, a, a') ->
-                      (* This part needs to be developed. *)
-                      let s = save s in
-                      let c = V2.ltr (M2.inv m) c in
-                      M2.(transform s (e00 m) (e10 m) (e01 m) (e11 m) (0.) (0.)));
-                      arc s (x c) (y c) ~r:1.0 ~a1:a ~a2:a'
-                      |> restore
-                  )*)
-          ()
-      | `Close -> close_path s
-    in
-    List.rev p |> List.iter add_segment
+    List.rev p
+    |> List.iter (function
+         | `Sub pt ->
+             let x, y = get_scaled_coords s (x pt) (y pt) in
+             move_to s x y
+         | `Line pt -> line_to s (x pt) (y pt)
+         | `Qcurve (c, pt) ->
+             failwith "quadratic_curve_to (x c) (y c) (x pt) (y pt))"
+         | `Ccurve (c, c', pt) ->
+             bezier_curve_to s (x c) (y c) (x c') (y c') (x pt) (y pt)
+         | `Earc (large, cw, r, a, pt) ->
+             (*( match Vgr.Private.P.earc_params last large cw r a pt with
+                     | None -> line_to (x pt) (y pt)
+                     | Some (c, m, a, a') ->
+                         (* This part needs to be developed. *)
+                         let s = save s in
+                         let c = V2.ltr (M2.inv m) c in
+                         M2.(transform s (e00 m) (e10 m) (e01 m) (e11 m) (0.) (0.)));
+                         arc s (x c) (y c) ~r:1.0 ~a1:a ~a2:a'
+                         |> restore
+                     )*)
+             ()
+         | `Close -> close_path s)
 
   let get_primitive : Pv.Data.primitive -> color = function
     | Pv.Data.Const c -> c
@@ -368,19 +431,14 @@ module Make (Bitmap : BitmapType) = struct
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
   let r_stroke (s : state) : unit =
     let draw_point pt =
-      let x = P2.x pt in
-      let y = P2.y pt in
-      let c = s.gstate.g_stroke in
+      let x = P2.x pt and y = P2.y pt and c = s.gstate.g_stroke in
       if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
     in
     let draw_subpath sp = List.iter (List.iter draw_point) sp.segs in
     List.iter draw_subpath s.path
 
   (** [r_fill r s] fills all the points inside [s.path] according to the given
-      filling rule [r].
-
-      PERF: very basic algorithm which needs to be seriously improved to be
-      really functional. *)
+      filling rule [r]. *)
   let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
     let c = s.gstate.g_fill in
     if Color.void <> c then
