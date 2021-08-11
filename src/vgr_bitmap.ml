@@ -82,7 +82,7 @@ let to_int_coords (x : float) (y : float) : int * int =
 let to_float_coords (x : int) (y : int) : float * float =
   (float_of_int x, float_of_int y)
 
-(** Extends the [Box2] module by adding a folding function. *)
+(** Extends the [Box2] module by adding convenient functions. *)
 module Box2 = struct
   include Box2
 
@@ -115,9 +115,8 @@ module Box2 = struct
     loop minx miny
 end
 
-(** [Stroker] contains all the algorithm implementations in order to calculates
-    coordinates of points of mathematical 2D graphics primitives shuch as lines
-    or Bézier curves.
+(** [Stroker] contains all the implementation of algorithms needed to render 2D
+    graphics primitives shuch as lines or Bézier curves.
 
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
@@ -149,8 +148,7 @@ module Stroker = struct
     loop [] x0 y0 err
 
   (** [cubic_bezier ?nb_line p1x p1y c1x c1y c2x c2y p2x p2y] returns all the
-      points needed to be connected by a line in order to approach a Bézier
-      curve.
+      coordinates of lines approaching the Bézier curve.
 
       [nb_line] determines in how many lines the curve is approximated.
 
@@ -184,8 +182,8 @@ module Stroker = struct
     loop [] 0.
 end
 
-(** [Filler_rule] contains all the algorithm implementations to determines
-    coordinates of points inside a path.
+(** [Filler_rule] contains all the implementation of algorithms needed to
+    determines coordinates of points inside a path.
 
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
@@ -193,8 +191,8 @@ module Filler_rule = struct
   open List
 
   (** [even_odd x y pts fpts] is the implementation of the even-odd rule
-      algorithm testing if the point ([x], [y]) is inside of the path delimited
-      by [pts].
+      algorithm which test if the point ([x], [y]) is inside of the path
+      delimited by [pts].
 
       PERF: very basic algorithm which needs to be seriously improved to be
       really functional. *)
@@ -289,6 +287,7 @@ module Make (Bitmap : BitmapType) = struct
     (* Graphical state. *)
     mutable gstate : gstate;
   }
+
   (* Convenient functions. TODO: this could be factorized with the other renderers. *)
 
   let partial = Pv.partial
@@ -330,7 +329,7 @@ module Make (Bitmap : BitmapType) = struct
     s.curr <- P2.v x y;
     s.path <- { empty_subpath with start = Some s.curr } :: s.path
 
-  (** [add_path_points s pts] add [pts] to the current path and if it's empty,
+  (** [add_path_points s pts] adds [pts] to the current path and if it's empty,
       begins a new one starting at [s.curr]. *)
   let add_path_points (s : state) (pts : p2 list) : unit =
     s.path <-
@@ -338,7 +337,7 @@ module Make (Bitmap : BitmapType) = struct
       | [] -> [ { empty_subpath with segs = [ pts ]; start = Some s.curr } ]
       | sp :: tl -> { sp with segs = pts :: sp.segs } :: tl)
 
-  (** [close_path s] Adds a line segment to the current path being built from
+  (** [close_path s] adds a line segment to the current path being built from
       the current point to the beginning of the current sub-path before closing
       it. After this call the current point will be at the joined endpoint of
       the sub-path.
@@ -551,9 +550,7 @@ module Make (Bitmap : BitmapType) = struct
       r;
       view = v;
       bitmap = b;
-      (* NOTE: need to find out why this needs to be the height instead of the
-         minimum between the height and the width or just the width.
-         + This probably should be replaced by a transformation matrix. *)
+      (* FIXME: this must be replaced by a transformation matrix. *)
       scaling = B.h b |> float_of_int;
       size = s;
       path = [];
