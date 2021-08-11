@@ -469,29 +469,33 @@ module Make (Bitmap : BitmapType) = struct
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r]. *)
   let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
+    let is_inside =
+      match r with `Anz -> Filler_rule.non_zero | `Aeo -> Filler_rule.even_odd
+    in
     let c = s.gstate.g_fill in
     if Color.void <> c then
-      let view =
-        Box2.v P2.o
-          (P2.v (float_of_int (B.w s.bitmap)) (float_of_int (B.h s.bitmap)))
-      in
       let pts = s.path |> List.fold_left (fun acc s -> s.segs :: acc) [] in
       let fpts =
         pts
         |> List.fold_left (fun acc ll -> List.flatten ll @ acc) []
         |> Array.of_list
       in
-      let is_inside =
-        match r with
-        | `Anz -> Filler_rule.non_zero
-        | `Aeo -> Filler_rule.even_odd
+      let minx, miny, maxx, maxy =
+        fpts
+        |> Array.fold_left
+             (fun (minx, miny, maxx, maxy) pt ->
+               let x = P2.x pt and y = P2.y pt in
+               ( (if x < minx then x else minx),
+                 (if y < miny then y else miny),
+                 (if x > maxx then x else maxx),
+                 if y > maxy then y else maxy ))
+             P2.(x fpts.(0), y fpts.(0), x fpts.(0), y fpts.(0))
       in
-      Box2.iter
-        (fun x y ->
-          if is_inside x y pts fpts then
-            let x, y = to_float_coords x y in
-            B.set s.bitmap x y c)
-        view
+      Box2.of_pts (P2.v minx miny) (P2.v maxx maxy)
+      |> Box2.iter (fun x y ->
+             if is_inside x y pts fpts then
+               let x, y = to_float_coords x y in
+               B.set s.bitmap x y c)
 
   (** [r_cut s a] renders a cut image. *)
   let rec r_cut (s : state) (a : P.area) : Pv.Data.image -> unit = function
