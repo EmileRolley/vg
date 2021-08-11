@@ -128,6 +128,8 @@ module Stroker = struct
       The Bresenham's line algorithm is used (see
       https://en.wikipedia.org/wiki/Bresenham's_line_algorithm) *)
   let bresenham_line (x0 : int) (y0 : int) (x1 : int) (y1 : int) : p2 list =
+    let add_pt x y pts = P2.v (float_of_int x) (float_of_int y) :: pts in
+
     let dx = abs (x1 - x0)
     and sx = if x0 < x1 then 1 else -1
     and dy = -1 * abs (y1 - y0)
@@ -135,14 +137,14 @@ module Stroker = struct
     let err = dx + dy in
 
     let rec loop pts x y err =
-      if x = x1 && y = y1 then pts
+      if x = x1 && y = y1 then add_pt x y pts
       else
         let e2 = 2 * err in
         let err = if e2 >= dy then err + dy else err in
         let x = if e2 >= dy then x + sx else x in
         let err = if e2 <= dx then err + dx else err in
         let y = if e2 <= dx then y + sy else y in
-        loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
+        loop (add_pt x y pts) x y err
     in
     loop [] x0 y0 err
 
@@ -178,6 +180,7 @@ module Stroker = struct
         in
         loop (P2.v x y :: acc) (t +. 1.)
     in
+
     loop [] 0.
 end
 
@@ -187,33 +190,47 @@ end
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
 module Filler_rule = struct
-  (** [even_odd x y pts] is the implementation of the even-odd rule algorithm.
+  open List
+
+  (** [even_odd x y pts fpts] is the implementation of the even-odd rule
+      algorithm testing if the point ([x], [y]) is inside of the path delimited
+      by [pts].
 
       PERF: very basic algorithm which needs to be seriously improved to be
-      really functional. -> using Lwt_list? *)
-  let even_odd (x : int) (y : int) (pts : p2 list list list) : bool =
-    let open List in
-    let is_in_pts x y =
-      pts
-      |> exists @@ exists
-         @@ exists (fun pt ->
-                let ptx', pty' = to_int_coords (P2.x pt) (P2.y pt) in
-                ptx' = x && pty' = y)
+      really functional. *)
+  let even_odd (x : int) (y : int) (pts : p2 list list list) (fpts : p2 array) :
+      bool =
+    let is_in_fpts x y =
+      fpts
+      |> Array.exists (fun pt ->
+             let ptx', pty' = to_int_coords (P2.x pt) (P2.y pt) in
+             ptx' = x && pty' = y)
     in
-    let is_crossing =
+
+    let is_crossing cmp =
       exists (fun pt ->
           let ptx, pty = to_int_coords (P2.x pt) (P2.y pt) in
-          ptx < x && pty = y && not (is_in_pts x y))
+          if cmp ptx x && pty = y && not (is_in_fpts x y) then true else false)
     in
-    let count =
-      fold_left
-        (fold_left (fun acc sp -> if is_crossing sp then acc + 1 else acc))
-        0 pts
+
+    let l, r =
+      pts
+      |> fold_left
+           (fold_left (fun (l, r) sp ->
+                if is_crossing ( < ) sp then (l + 1, r)
+                else if is_crossing ( > ) sp then (l, r + 1)
+                else (l, r)))
+           (0, 0)
     in
-    count mod 2 = 1
+    (* NOTE: without counting the casted ray intersections to the left AND to
+       the right with the path, when the casted ray is aligned with a segment
+       of the path, it's falsify the counting. For now, this trick resolves the
+       problem but it IS NOT a sustainable solution. *)
+    min l r mod 2 = 1
 
   (** [non_zero x y pts] is the implementation of the non-zero rule algorithm. *)
-  let non_zero (x : int) (y : int) (pts : p2 list list list) : bool =
+  let non_zero (x : int) (y : int) (pts : p2 list list list) (fpts : p2 array) :
+      bool =
     failwith "TODO"
 end
 
@@ -362,22 +379,21 @@ module Make (Bitmap : BitmapType) = struct
     and cx, cy = get_scaled_coords s cx cy
     and cx', cy' = get_scaled_coords s cx' cy'
     and p2x, p2y = get_scaled_coords s ptx pty in
-    let to_line =
+    let lines_to_draw =
       Stroker.cubic_bezier p1x p1y cx cy cx' cy' p2x p2y |> List.rev
     in
-    let r_line_pts = ref [] in
     ignore
-      (List.fold_left
-         (fun prev pt ->
-           if prev = pt then pt
-           else
-             let x0, y0 = to_int_coords (P2.x prev) (P2.y prev)
-             and x1, y1 = to_int_coords (P2.x pt) (P2.y pt) in
-             r_line_pts := Stroker.bresenham_line x0 y0 x1 y1 @ !r_line_pts;
-             pt)
-         (List.hd to_line) to_line);
-    s.curr <- P2.v p2x p2y;
-    add_path_points s !r_line_pts
+      (lines_to_draw
+      |> List.fold_left
+           (fun prev pt ->
+             if prev = pt then pt
+             else
+               let x0, y0 = to_int_coords (P2.x prev) (P2.y prev)
+               and x1, y1 = to_int_coords (P2.x pt) (P2.y pt) in
+               s.curr <- pt;
+               add_path_points s (Stroker.bresenham_line x0 y0 x1 y1);
+               pt)
+           (List.hd lines_to_draw))
 
   (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
@@ -430,12 +446,26 @@ module Make (Bitmap : BitmapType) = struct
 
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
   let r_stroke (s : state) : unit =
-    let draw_point pt =
-      let x = P2.x pt and y = P2.y pt and c = s.gstate.g_stroke in
-      if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
+    let draw_point pt ~c =
+      let x = P2.x pt and y = P2.y pt in
+      if Color.void <> c && is_in_view s x y then
+        (* if B.get s.bitmap x y <> Color.white then B.set s.bitmap x y Color.red *)
+        B.set s.bitmap x y c
     in
-    let draw_subpath sp = List.iter (List.iter draw_point) sp.segs in
-    List.iter draw_subpath s.path
+
+    (* TODO: remove the debug argument. *)
+    let draw_subpath ?(debug = false) sp =
+      let cols = [| Color.blue; Color.green; Color.red |] in
+      List.iteri
+        (fun i l ->
+          List.iter
+            (draw_point
+               ~c:(if debug then cols.(i mod 3) else s.gstate.g_stroke))
+            l)
+        sp.segs
+    in
+
+    List.iter draw_subpath (s.path |> List.rev)
 
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r]. *)
@@ -446,7 +476,12 @@ module Make (Bitmap : BitmapType) = struct
         Box2.v P2.o
           (P2.v (float_of_int (B.w s.bitmap)) (float_of_int (B.h s.bitmap)))
       in
-      let pts = List.fold_left (fun acc s -> s.segs :: acc) [] s.path in
+      let pts = s.path |> List.fold_left (fun acc s -> s.segs :: acc) [] in
+      let fpts =
+        pts
+        |> List.fold_left (fun acc ll -> List.flatten ll @ acc) []
+        |> Array.of_list
+      in
       let is_inside =
         match r with
         | `Anz -> Filler_rule.non_zero
@@ -454,7 +489,7 @@ module Make (Bitmap : BitmapType) = struct
       in
       Box2.iter
         (fun x y ->
-          if is_inside x y pts then
+          if is_inside x y pts fpts then
             let x, y = to_float_coords x y in
             B.set s.bitmap x y c)
         view
