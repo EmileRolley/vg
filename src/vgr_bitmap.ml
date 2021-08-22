@@ -175,46 +175,33 @@ end
 module Filler_rule = struct
   open List
 
-  (** [even_odd x y pts fpts] is the implementation of the even-odd rule
-      algorithm which test if the point ([x], [y]) is inside of the path
-      delimited by [pts].
+  (** [even_odd x y poly] is the implementation of the even-odd rule algorithm
+      which test if the point ([x], [y]) is inside of the polygon [poly].
 
-      PERF: very basic algorithm which needs to be seriously improved to be
-      really functional. *)
-  let even_odd (x : int) (y : int) (pts : p2 list list list) (fpts : p2 array) :
-      bool =
-    let is_in_fpts x y =
-      fpts
-      |> Array.exists (fun pt ->
-             let ptx', pty' = to_int_coords (P2.x pt) (P2.y pt) in
-             ptx' = x && pty' = y)
+      The algorithm is taken from
+      https://en.wikipedia.org/wiki/Even%E2%80%93odd_rule#Implementation with
+      excluding border points as Cairo do. *)
+  let even_odd (x : int) (y : int) (poly : p2 array) : bool =
+    let num = Array.length poly in
+    let rec loop i j c =
+      if i == num then c
+      else
+        let pti_x, pti_y = P2.(to_int_coords (x poly.(i)) (y poly.(i)))
+        and ptj_x, ptj_y = P2.(to_int_coords (x poly.(j)) (y poly.(j))) in
+        if x == pti_x && y == pti_y then (* corner *) false
+        else if y < pti_y <> (y < ptj_y) then
+          let slope =
+            ((x - pti_x) * (ptj_y - pti_y)) - ((ptj_x - pti_x) * (y - pti_y))
+          in
+          if 0 == slope then (* border *) false
+          else if 0 > slope <> (ptj_y < pti_y) then loop (i + 1) i (not c)
+          else loop (i + 1) i c
+        else loop (i + 1) i c
     in
+    loop 0 (num - 1) false
 
-    let is_crossing cmp =
-      exists (fun pt ->
-          let ptx, pty = to_int_coords (P2.x pt) (P2.y pt) in
-          if cmp ptx x && pty = y && not (is_in_fpts x y) then true else false)
-    in
-
-    let l, r =
-      pts
-      |> fold_left
-           (fold_left (fun (l, r) sp ->
-                if is_crossing ( < ) sp then (l + 1, r)
-                else if is_crossing ( > ) sp then (l, r + 1)
-                else (l, r)))
-           (0, 0)
-    in
-    (* NOTE: without counting the casted ray intersections to the left AND to
-       the right with the path, when the casted ray is aligned with a segment
-       of the path, it's falsify the counting. For now, this trick resolves the
-       problem but it IS NOT a sustainable solution. *)
-    min l r mod 2 = 1
-
-  (** [non_zero x y pts] is the implementation of the non-zero rule algorithm. *)
-  let non_zero (x : int) (y : int) (pts : p2 list list list) (fpts : p2 array) :
-      bool =
-    failwith "TODO"
+  (** [non_zero x y poly] is the implementation of the non-zero rule algorithm. *)
+  let non_zero (x : int) (y : int) (poly : p2 array) : bool = failwith "TODO"
 end
 
 module Make (Bitmap : BitmapType) = struct
