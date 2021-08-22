@@ -137,8 +137,8 @@ module Stroker = struct
 
       [nb_line] determines in how many lines the curve is approximated.
 
-      Algorithm from here:
-      https://rosettacode.org/wiki/Bitmap/B%C3%A9zier_curves/Cubic#C *)
+      The algorithm is taken from
+      https://rosettacode.org/wiki/Bitmap/B%C3%A9zier_curves/Cubic *)
   let cubic_bezier
       ?(nb_line = 20.)
       (p1x : float)
@@ -163,7 +163,36 @@ module Stroker = struct
         in
         loop (P2.v x y :: acc) (t +. 1.)
     in
+    loop [] 0.
 
+  (** [cubic_bezier ?nb_line p1x p1y c1x c1y p2x p2y] returns all the
+      coordinates of lines approaching the Bézier curve.
+
+      [nb_line] determines in how many lines the curve is approximated.
+
+      The algorithm is taken from
+      https://rosettacode.org/wiki/Bitmap/B%C3%A9zier_curves/Quadratic *)
+  let quadratic_bezier
+      ?(nb_line = 20.)
+      (p1x : float)
+      (p1y : float)
+      (c1x : float)
+      (c1y : float)
+      (p2x : float)
+      (p2y : float) : p2 list =
+    let rec loop acc t =
+      if t > nb_line then acc
+      else
+        let t' = t /. nb_line in
+        let a = (1. -. t') ** 2.
+        and b = 2. *. t' *. (1. -. t')
+        and c = t' ** 2. in
+        let x, y =
+          ( (a *. p1x) +. (b *. c1x) +. (c *. p2x),
+            (a *. p1y) +. (b *. c1y) +. (c *. p2y) )
+        in
+        loop (P2.v x y :: acc) (t +. 1.)
+    in
     loop [] 0.
 end
 
@@ -338,33 +367,39 @@ module Make (Bitmap : BitmapType) = struct
     Stroker.bresenham_line x0 y0 x1' y1' |> add_path_points s;
     s.curr <- P2.v x1 y1
 
+  (** [bezier_curve_to s t c1x c1y c2y ptx pty] adds points to the current
+      [s.path] according the given bezier curve type [t]*)
   let bezier_curve_to
       (s : state)
-      (cx : float)
-      (cy : float)
-      (cx' : float)
-      (cy' : float)
+      (t : [< `Quad | `Cubic ])
+      (c1x : float)
+      (c1y : float)
+      ?(c2x = 0.)
+      ?(c2y = 0.)
       (ptx : float)
       (pty : float) : unit =
     let p1x, p1y = (P2.x s.curr, P2.y s.curr)
-    and cx, cy = get_scaled_coords s cx cy
-    and cx', cy' = get_scaled_coords s cx' cy'
+    and c1x, c1y = get_scaled_coords s c1x c1y
+    and c2x, c2y = get_scaled_coords s c2x c2y
     and p2x, p2y = get_scaled_coords s ptx pty in
     let lines_to_draw =
-      Stroker.cubic_bezier p1x p1y cx cy cx' cy' p2x p2y |> List.rev
+      match t with
+      | `Cubic -> Stroker.cubic_bezier p1x p1y c1x c1y c2x c2y p2x p2y
+      | `Quad -> Stroker.quadratic_bezier p1x p1y c1x c1y p2x p2y
     in
+    let acc = ref 0 in
     ignore
       (lines_to_draw
+      |> List.rev
       |> List.fold_left
            (fun prev pt ->
-             if prev = pt then pt
-             else
-               let x0, y0 = to_int_coords (P2.x prev) (P2.y prev)
-               and x1, y1 = to_int_coords (P2.x pt) (P2.y pt) in
-               s.curr <- pt;
-               add_path_points s (Stroker.bresenham_line x0 y0 x1 y1);
-               pt)
-           (List.hd lines_to_draw))
+             let x0, y0 = to_int_coords (P2.x prev) (P2.y prev)
+             and x1, y1 = to_int_coords (P2.x pt) (P2.y pt) in
+             add_path_points s (Stroker.bresenham_line x0 y0 x1 y1);
+             s.curr <- pt;
+             acc := !acc + 1;
+             pt)
+           s.curr)
 
   (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
@@ -375,10 +410,10 @@ module Make (Bitmap : BitmapType) = struct
              let x, y = get_scaled_coords s (x pt) (y pt) in
              move_to s x y
          | `Line pt -> line_to s (x pt) (y pt)
-         | `Qcurve (c, pt) ->
-             failwith "quadratic_curve_to (x c) (y c) (x pt) (y pt))"
+         | `Qcurve (c, pt) -> bezier_curve_to s `Quad (x c) (y c) (x pt) (y pt)
          | `Ccurve (c, c', pt) ->
-             bezier_curve_to s (x c) (y c) (x c') (y c') (x pt) (y pt)
+             bezier_curve_to s `Cubic (x c) (y c) ~c2x:(x c') ~c2y:(y c') (x pt)
+               (y pt)
          | `Earc (large, cw, r, a, pt) ->
              (*( match Vgr.Private.P.earc_params last large cw r a pt with
                      | None -> line_to (x pt) (y pt)
@@ -415,18 +450,28 @@ module Make (Bitmap : BitmapType) = struct
     let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
     x >= 0. && x < w && y >= 0. && y < h
 
-  (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
+  (** [stroke s] fills the [s.bitmap] according to the current [s.gstate].
+
+      TODO: remove the debug argument. *)
   let r_stroke (s : state) : unit =
-    let draw_point pt ~c =
+    let draw_point ?(debug = false) pt ~c =
       let x = P2.x pt and y = P2.y pt in
       if Color.void <> c && is_in_view s x y then
-        (* if B.get s.bitmap x y <> Color.white then B.set s.bitmap x y Color.red *)
-        B.set s.bitmap x y c
+        if debug && B.get s.bitmap x y <> Color.white then
+          B.set s.bitmap x y Color.red
+        else B.set s.bitmap x y c
     in
 
-    (* TODO: remove the debug argument. *)
     let draw_subpath ?(debug = false) sp =
-      let cols = [| Color.blue; Color.green; Color.red |] in
+      let cols =
+        [|
+          Color.blue;
+          Color.green;
+          Color.v_srgb 1. 0.87 0.;
+          Color.v_srgb 0.82 0.2 1.;
+          Color.v_srgb 0. 1. 1.;
+        |]
+      in
       List.iteri
         (fun i l ->
           List.iter
@@ -436,20 +481,21 @@ module Make (Bitmap : BitmapType) = struct
         sp.segs
     in
 
-    List.iter draw_subpath (s.path |> List.rev)
+    List.iter (draw_subpath ~debug:true) (s.path |> List.rev)
 
   (** [r_fill r s] fills all the points inside [s.path] according to the given
-      filling rule [r]. *)
+      filling rule [r].
+
+      NOTE: should it closes all subpaths before filling them, like cairo? *)
   let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
     let is_inside =
       match r with `Anz -> Filler_rule.non_zero | `Aeo -> Filler_rule.even_odd
     in
     let c = s.gstate.g_fill in
     if Color.void <> c then
-      let pts = s.path |> List.fold_left (fun acc s -> s.segs :: acc) [] in
       let fpts =
-        pts
-        |> List.fold_left (fun acc ll -> List.flatten ll @ acc) []
+        s.path
+        |> List.fold_left (fun acc s -> List.flatten s.segs @ acc) []
         |> Array.of_list
       in
       let minx, miny, maxx, maxy =
@@ -465,7 +511,7 @@ module Make (Bitmap : BitmapType) = struct
       in
       Box2.of_pts (P2.v minx miny) (P2.v maxx maxy)
       |> Box2.iter (fun x y ->
-             if is_inside x y pts fpts then
+             if is_inside x y fpts then
                let x, y = to_float_coords x y in
                B.set s.bitmap x y c)
 
