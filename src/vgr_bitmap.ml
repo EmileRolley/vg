@@ -86,26 +86,13 @@ let to_float_coords (x : int) (y : int) : float * float =
 module Box2 = struct
   include Box2
 
-  (** [fold f acc b] is a classical left folding function on [box2]. *)
-  let fold (f : 'a -> int -> int -> 'a) (acc : 'a) (b : box2) : 'a =
-    let minx = Box2.minx b |> int_of_float
-    and miny = Box2.miny b |> int_of_float
-    and maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1
-    and maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
-    let rec loop acc x y =
-      if x = maxx && y = maxy then acc
-      else
-        let acc = f acc x y in
-        if x = maxx then loop acc minx (y + 1) else loop acc (x + 1) y
-    in
-    loop acc minx miny
-
   (** [iter f b] is a classical itering function on [box2]. *)
   let iter (f : 'int -> int -> unit) (b : box2) : 'a =
-    let minx = Box2.minx b |> int_of_float
-    and miny = Box2.miny b |> int_of_float
-    and maxx = Box2.maxx b |> int_of_float |> ( + ) ~-1
-    and maxy = Box2.maxy b |> int_of_float |> ( + ) ~-1 in
+    let to_int f = f b |> int_of_float in
+    let minx = to_int Box2.minx
+    and miny = to_int Box2.miny
+    and maxx = to_int Box2.maxx
+    and maxy = to_int Box2.maxy in
     let rec loop x y =
       if x = maxx && y = maxy then ()
       else (
@@ -127,8 +114,6 @@ module Stroker = struct
       The Bresenham's line algorithm is used (see
       https://en.wikipedia.org/wiki/Bresenham's_line_algorithm) *)
   let bresenham_line (x0 : int) (y0 : int) (x1 : int) (y1 : int) : p2 list =
-    let add_pt x y pts = P2.v (float_of_int x) (float_of_int y) :: pts in
-
     let dx = abs (x1 - x0)
     and sx = if x0 < x1 then 1 else -1
     and dy = -1 * abs (y1 - y0)
@@ -136,14 +121,14 @@ module Stroker = struct
     let err = dx + dy in
 
     let rec loop pts x y err =
-      if x = x1 && y = y1 then add_pt x y pts
+      if x = x1 && y = y1 then pts
       else
         let e2 = 2 * err in
         let err = if e2 >= dy then err + dy else err in
         let x = if e2 >= dy then x + sx else x in
         let err = if e2 <= dx then err + dx else err in
         let y = if e2 <= dx then y + sy else y in
-        loop (add_pt x y pts) x y err
+        loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
     in
     loop [] x0 y0 err
 
