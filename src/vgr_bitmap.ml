@@ -8,6 +8,7 @@ open Gg
 open Vg
 open Vgr
 module Pv = Private
+module Float = Stdlib.Float
 
 (** Temporary debugging functions. *)
 module Debug = struct
@@ -196,12 +197,12 @@ module Stroker = struct
     loop [] 0.
 end
 
-(** [Filler_rule] contains all the implementation of algorithms needed to
-    determines coordinates of points inside a path.
+(** [Filler] contains all the implementation of algorithms needed to determines
+    coordinates of points inside a path.
 
     All point coordinates used by the following functions are assumed to be
     scaled (see {!state.scaling}). ) *)
-module Filler_rule = struct
+module Filler = struct
   open List
 
   (** [even_odd x y poly] is the implementation of the even-odd rule algorithm
@@ -229,6 +230,68 @@ module Filler_rule = struct
     in
     loop 0 (num - 1) false
 
+  (** [scanline f poly] is an implementation of the scanline rendering
+      algorithm. It apply the [f] function to each points of each crossing
+      lines.
+
+      FIXME: I think the filling could be more precise.
+
+      FIXME: need to manage properly intricated paths. *)
+  let scanline (f : float -> float -> unit) (poly : p2 array) : unit =
+    let rec loop ?(start = false) y aet et =
+      (* Iterates over each lines of the path. *)
+      if start || 0 <> List.length aet || 0 <> List.length et then
+        (* Updates the edge table and the active edge table. *)
+        let to_move = ref [] in
+        let et =
+          et
+          |> List.filter (fun ((ymin, x, _, s) as e) ->
+                 if y = ymin then (
+                   to_move := e :: !to_move;
+                   false)
+                 else true)
+        and aet =
+          aet
+          |> List.append !to_move
+          |> List.filter (fun (_, _, ymax, _) -> y <> ymax)
+          |> List.fast_sort (fun (_, x0, _, _) (_, x1, _, _) ->
+                 Float.compare x0 x1)
+        in
+
+        (* Applies [f] to each points inside the path on the current crossing
+           line and updates the [x] value. *)
+        let aet_len = List.length aet in
+        let aet =
+          aet
+          |> List.mapi (fun i (y0, x0, ymax, slope) ->
+                 (if i mod 2 = 0 then
+                  let y1, x1, _, _ = List.nth aet ((i + 1) mod aet_len) in
+                  for i = int_of_float x0 + 1 to int_of_float x1 do
+                    f (float_of_int i) y
+                  done);
+
+                 (y0, x0 +. slope, ymax, slope))
+        in
+        loop (y +. 1.) aet et
+    in
+
+    (* Initializes the edge table. *)
+    let poly_len = Array.length poly in
+    let et =
+      List.init poly_len (fun i ->
+          let curr = poly.(i) and next = poly.((i + 1) mod poly_len) in
+          let x0, y0, x1, y1 = P2.(x curr, y curr, x next, y next) in
+          let ymin, xstart = if y0 < y1 then (y0, x0) else (y1, x1)
+          and ymax = max y0 y1
+          and slope = (x0 -. x1) /. (y0 -. y1) in
+
+          (ymin, xstart, ymax, slope))
+      |> List.fast_sort (fun (y0, _, _, _) (y1, _, _, _) -> Float.compare y0 y1)
+      |> List.filter (fun (_, _, _, s) -> not (Float.is_infinite s))
+    in
+    let y, _, _, _ = List.hd et in
+    loop ~start:true y [] et
+
   (** [non_zero x y poly] is the implementation of the non-zero rule algorithm. *)
   let non_zero (x : int) (y : int) (poly : p2 array) : bool = failwith "TODO"
 end
@@ -242,13 +305,12 @@ module Make (Bitmap : BitmapType) = struct
   type subpath = {
     (* All points that needs to be drawn in the bitmap.
 
-       NOTE: A dimension should be removed to be coherent with the semantics.
-       Do we really need to store distinctly segments of sub-paths?
        PERF: To test with 'big' images and compare different data structures
        such as Hashtbl..
     *)
-    segs : p2 list list;
-    (* Beginning of the sub-path. *)
+    segs : p2 list;
+    (* Beginning of the sub-path.
+       NOTE: not useful if keeping [list] to store points. *)
     start : p2 option;
     (* Tracks the current state of the sub-path: is it closed or not? *)
     closed : bool;
@@ -310,7 +372,7 @@ module Make (Bitmap : BitmapType) = struct
     to_int_coords (P2.x s.curr) (P2.y s.curr)
 
   let get_scaled_coords (s : state) (x : float) (y : float) : float * float =
-    (s.scaling *. x, s.scaling *. y)
+    (Float.round (s.scaling *. x), Float.round (s.scaling *. y))
 
   let get_int_scaled_coords (s : state) (x : float) (y : float) : int * int =
     to_int_coords (s.scaling *. x) (s.scaling *. y)
@@ -324,10 +386,10 @@ module Make (Bitmap : BitmapType) = struct
 
   let get_current_subpath (s : state) : subpath option = List.nth_opt s.path 0
 
-  (** [move_to s x y] updates the current position to ([x], [y]) and opan a new
-      sub-path starting at ([x], [y]). *)
-  let move_to (s : state) (x : float) (y : float) : unit =
-    s.curr <- P2.v x y;
+  (** [move_to s pt] updates the current position to ([pt.x], [pt.y]) and opan a
+      new sub-path starting at ([pt.x], [pt.y]). *)
+  let move_to (s : state) (pt : p2) : unit =
+    s.curr <- pt;
     s.path <- { empty_subpath with start = Some s.curr } :: s.path
 
   (** [add_path_points s pts] adds [pts] to the current path and if it's empty,
@@ -335,8 +397,17 @@ module Make (Bitmap : BitmapType) = struct
   let add_path_points (s : state) (pts : p2 list) : unit =
     s.path <-
       (match s.path with
-      | [] -> [ { empty_subpath with segs = [ pts ]; start = Some s.curr } ]
-      | sp :: tl -> { sp with segs = pts :: sp.segs } :: tl)
+      | [] -> [ { empty_subpath with segs = pts; start = Some s.curr } ]
+      | sp :: tl -> { sp with segs = sp.segs @ pts } :: tl)
+
+  let add_path_point (s : state) (pt : p2) : unit = add_path_points s [ pt ]
+
+  (** [line_to s] pt adds a line to the path from the current point to position
+      ([pt.x], [pt.y]) scaled by [s.scaling]. After this call the current point
+      will be ([pt.x], [pt.y]). *)
+  let line_to (s : state) (pt : p2) : unit =
+    add_path_point s pt;
+    s.curr <- pt
 
   (** [close_path s] adds a line segment to the current path being built from
       the current point to the beginning of the current sub-path before closing
@@ -346,26 +417,9 @@ module Make (Bitmap : BitmapType) = struct
       If there is no current point before the call to [close_path], this
       function will have no effect. *)
   let close_path (s : state) : unit =
-    let close curr_sp start =
-      let x0, y0 = get_curr_int_coords s
-      and x1, y1 = to_int_coords (P2.x start) (P2.y start) in
-      let r_line_pts = Stroker.bresenham_line x0 y0 x1 y1 in
-      s.curr <- start;
-      add_path_points s r_line_pts
-    in
     Option.iter
-      (fun curr_sp -> Option.iter (close curr_sp) curr_sp.start)
+      (fun curr_sp -> Option.iter (line_to s) curr_sp.start)
       (get_current_subpath s)
-
-  (** [line_to s x y] adds a line to the path from the current point to position
-      ([x], [y]) scaled by [s.scaling]. After this call the current point will
-      be ([x], [y]). *)
-  let line_to (s : state) (x : float) (y : float) : unit =
-    let x0, y0 = get_curr_int_coords s in
-    let x1, y1 = get_scaled_coords s x y in
-    let x1', y1' = to_int_coords x1 y1 in
-    Stroker.bresenham_line x0 y0 x1' y1' |> add_path_points s;
-    s.curr <- P2.v x1 y1
 
   (** [bezier_curve_to s t c1x c1y c2y ptx pty] adds points to the current
       [s.path] according the given bezier curve type [t]*)
@@ -378,38 +432,24 @@ module Make (Bitmap : BitmapType) = struct
       ?(c2y = 0.)
       (ptx : float)
       (pty : float) : unit =
-    let p1x, p1y = (P2.x s.curr, P2.y s.curr)
-    and c1x, c1y = get_scaled_coords s c1x c1y
-    and c2x, c2y = get_scaled_coords s c2x c2y
-    and p2x, p2y = get_scaled_coords s ptx pty in
-    let lines_to_draw =
-      match t with
-      | `Cubic -> Stroker.cubic_bezier p1x p1y c1x c1y c2x c2y p2x p2y
-      | `Quad -> Stroker.quadratic_bezier p1x p1y c1x c1y p2x p2y
-    in
-    let acc = ref 0 in
-    ignore
-      (lines_to_draw
-      |> List.rev
-      |> List.fold_left
-           (fun prev pt ->
-             let x0, y0 = to_int_coords (P2.x prev) (P2.y prev)
-             and x1, y1 = to_int_coords (P2.x pt) (P2.y pt) in
-             add_path_points s (Stroker.bresenham_line x0 y0 x1 y1);
-             s.curr <- pt;
-             acc := !acc + 1;
-             pt)
-           s.curr)
+    let p1x, p1y = (P2.x s.curr, P2.y s.curr) in
+    s.curr <- P2.v ptx pty;
+    add_path_points s
+    @@ ((match t with
+        | `Cubic -> Stroker.cubic_bezier p1x p1y c1x c1y c2x c2y ptx pty
+        | `Quad -> Stroker.quadratic_bezier p1x p1y c1x c1y ptx pty)
+       (* FIXME: should be avoided. *)
+       |> List.rev
+       |> List.tl)
 
   (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
     let open P2 in
-    List.rev p
+    p
+    |> List.rev
     |> List.iter (function
-         | `Sub pt ->
-             let x, y = get_scaled_coords s (x pt) (y pt) in
-             move_to s x y
-         | `Line pt -> line_to s (x pt) (y pt)
+         | `Sub pt -> move_to s pt
+         | `Line pt -> line_to s pt
          | `Qcurve (c, pt) -> bezier_curve_to s `Quad (x c) (y c) (x pt) (y pt)
          | `Ccurve (c, c', pt) ->
              bezier_curve_to s `Cubic (x c) (y c) ~c2x:(x c') ~c2y:(y c') (x pt)
@@ -450,70 +490,65 @@ module Make (Bitmap : BitmapType) = struct
     let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
     x >= 0. && x < w && y >= 0. && y < h
 
-  (** [stroke s] fills the [s.bitmap] according to the current [s.gstate].
-
-      TODO: remove the debug argument. *)
-  let r_stroke (s : state) : unit =
-    let draw_point ?(debug = false) pt ~c =
-      let x = P2.x pt and y = P2.y pt in
-      if Color.void <> c && is_in_view s x y then
-        if debug && B.get s.bitmap x y <> Color.white then
-          B.set s.bitmap x y Color.red
-        else B.set s.bitmap x y c
-    in
-
-    let draw_subpath ?(debug = false) sp =
-      let cols =
-        [|
-          Color.blue;
-          Color.green;
-          Color.v_srgb 1. 0.87 0.;
-          Color.v_srgb 0.82 0.2 1.;
-          Color.v_srgb 0. 1. 1.;
-        |]
+  (** [r_path s] returns all points of the current path (which must only be
+      combosed of lines. *)
+  let r_path (s : state) : p2 list =
+    let r_subpath sp =
+      let start =
+        let x, y =
+          (* Invariant: for each new sub-paths, [subpath.start] is necessarily not [None]. *)
+          let start = Option.get sp.start in
+          get_scaled_coords s (P2.x start) (P2.y start)
+        in
+        P2.v x y
       in
-      List.iteri
-        (fun i l ->
-          List.iter
-            (draw_point
-               ~c:(if debug then cols.(i mod 3) else s.gstate.g_stroke))
-            l)
+      let _, _, pts =
         sp.segs
+        |> List.fold_left
+             (fun (i, prev, pts) pt ->
+               let x, y = (P2.x pt, P2.y pt) in
+               let x0, y0 = to_int_coords (P2.x prev) (P2.y prev) in
+               let x1, y1 = get_scaled_coords s x y in
+               let x1', y1' = to_int_coords x1 y1 in
+               s.curr <- P2.v x1 y1;
+               (i + 1, P2.v x1 y1, Stroker.bresenham_line x0 y0 x1' y1' @ pts))
+             (0, start, [])
+      in
+      pts
     in
+    List.fold_left (fun acc sp -> r_subpath sp @ acc) [] s.path
 
-    List.iter (draw_subpath ~debug:true) (s.path |> List.rev)
+  (** [draw_point s c pt] draw the corresponding element of [pt] in [s.bitmap]. *)
+  let draw_point (s : state) (c : color) (pt : p2) : unit =
+    let x = P2.x pt and y = P2.y pt in
+    if Color.void <> c && is_in_view s x y then B.set s.bitmap x y c
+
+  (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
+  let r_stroke (s : state) : unit =
+    ignore (r_path s |> List.iter (draw_point s s.gstate.g_stroke))
 
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r].
 
       NOTE: should it closes all subpaths before filling them, like cairo? *)
   let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
-    let is_inside =
-      match r with `Anz -> Filler_rule.non_zero | `Aeo -> Filler_rule.even_odd
-    in
     let c = s.gstate.g_fill in
     if Color.void <> c then
-      let fpts =
+      let pts =
         s.path
-        |> List.fold_left (fun acc s -> List.flatten s.segs @ acc) []
+        |> List.fold_left
+             (fun acc sp ->
+               (sp.segs
+               |> List.map (fun pt ->
+                      let x, y = get_scaled_coords s (P2.x pt) (P2.y pt) in
+                      P2.v x y))
+               @ acc)
+             []
         |> Array.of_list
       in
-      let minx, miny, maxx, maxy =
-        fpts
-        |> Array.fold_left
-             (fun (minx, miny, maxx, maxy) pt ->
-               let x = P2.x pt and y = P2.y pt in
-               ( (if x < minx then x else minx),
-                 (if y < miny then y else miny),
-                 (if x > maxx then x else maxx),
-                 if y > maxy then y else maxy ))
-             P2.(x fpts.(0), y fpts.(0), x fpts.(0), y fpts.(0))
-      in
-      Box2.of_pts (P2.v minx miny) (P2.v maxx maxy)
-      |> Box2.iter (fun x y ->
-             if is_inside x y fpts then
-               let x, y = to_float_coords x y in
-               B.set s.bitmap x y c)
+      match r with
+      | `Anz -> failwith "TODO: implement the non-zero filling rule."
+      | `Aeo -> Filler.scanline (fun x y -> draw_point s c (P2.v x y)) pts
 
   (** [r_cut s a] renders a cut image. *)
   let rec r_cut (s : state) (a : P.area) : Pv.Data.image -> unit = function
@@ -561,8 +596,9 @@ module Make (Bitmap : BitmapType) = struct
               s.todo <- Draw i' :: Draw i :: todo;
               r_image s k r
           | Tr (_tr, i) ->
-              s.todo <- todo;
-              warn s (`Other "TODO: support transformations.");
+              s.todo <- Draw i :: todo;
+              D.pp_img i;
+              (* warn s (`Other "TODO: support transformations."); *)
               r_image s k r)
 
   (** [create_state b s v r] creates a initial state. *)
