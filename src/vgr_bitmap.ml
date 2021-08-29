@@ -205,39 +205,30 @@ end
 module Filler = struct
   open List
 
-  (** [even_odd x y poly] is the implementation of the even-odd rule algorithm
-      which test if the point ([x], [y]) is inside of the polygon [poly].
+  (** Models an edge table entry. *)
+  type edge = {
+    (* Is the lowest y-value of the edge. *)
+    ymin : float;
+    (* Is the x-value of the vertex with [ymin]. *)
+    xstart : float;
+    (* Is the highest y-value of the edge. *)
+    ymax : float;
+    (* Is the edge offest between two scan lines (dx/dy). *)
+    slope : float;
+    (* Is the direction of the edge: 1 if it going upward otherwise -1. *)
+    direction : int;
+  }
 
-      The algorithm is taken from
-      https://en.wikipedia.org/wiki/Even%E2%80%93odd_rule#Implementation with
-      excluding border points as Cairo do. *)
-  let even_odd (x : int) (y : int) (poly : p2 array) : bool =
-    let num = Array.length poly in
-    let rec loop i j c =
-      if i == num then c
-      else
-        let pti_x, pti_y = P2.(to_int_coords (x poly.(i)) (y poly.(i)))
-        and ptj_x, ptj_y = P2.(to_int_coords (x poly.(j)) (y poly.(j))) in
-        if x == pti_x && y == pti_y then (* corner *) false
-        else if y < pti_y <> (y < ptj_y) then
-          let slope =
-            ((x - pti_x) * (ptj_y - pti_y)) - ((ptj_x - pti_x) * (y - pti_y))
-          in
-          if 0 == slope then (* border *) false
-          else if 0 > slope <> (ptj_y < pti_y) then loop (i + 1) i (not c)
-          else loop (i + 1) i c
-        else loop (i + 1) i c
-    in
-    loop 0 (num - 1) false
-
-  (** [scanline f poly] is an implementation of the scanline rendering
+  (** [scanline r f poly] is an implementation of the scanline rendering
       algorithm. It apply the [f] function to each points of each crossing
       lines.
 
       FIXME: I think the filling could be more precise.
 
       FIXME: need to manage properly intricated paths. *)
-  let scanline (f : float -> float -> unit) (poly : p2 array) : unit =
+  let scanline
+      (r : [ `Anz | `Aeo ]) (f : float -> float -> unit) (poly : p2 array) :
+      unit =
     let rec loop ?(start = false) y aet et =
       (* Iterates over each lines of the path. *)
       if start || 0 <> List.length aet || 0 <> List.length et then
@@ -245,32 +236,38 @@ module Filler = struct
         let to_move = ref [] in
         let et =
           et
-          |> List.filter (fun ((ymin, x, _, s) as e) ->
-                 if y = ymin then (
+          |> List.filter (fun e ->
+                 if y = e.ymin then (
                    to_move := e :: !to_move;
                    false)
                  else true)
         and aet =
           aet
           |> List.append !to_move
-          |> List.filter (fun (_, _, ymax, _) -> y <> ymax)
-          |> List.fast_sort (fun (_, x0, _, _) (_, x1, _, _) ->
-                 Float.compare x0 x1)
+          |> List.filter (fun e -> y <> e.ymax)
+          |> List.fast_sort (fun e0 e1 -> Float.compare e0.xstart e1.xstart)
         in
 
         (* Applies [f] to each points inside the path on the current crossing
            line and updates the [x] value. *)
         let aet_len = List.length aet in
+        let winding_nb =
+          ref (List.fold_left (fun acc e -> acc + e.direction) 0 aet)
+        in
         let aet =
           aet
-          |> List.mapi (fun i (y0, x0, ymax, slope) ->
-                 (if i mod 2 = 0 then
-                  let y1, x1, _, _ = List.nth aet ((i + 1) mod aet_len) in
-                  for i = int_of_float x0 + 1 to int_of_float x1 do
+          |> List.mapi (fun i e0 ->
+                 winding_nb := !winding_nb - e0.direction;
+                 (if (r = `Aeo && i mod 2 = 0) || (r = `Anz && 0 <> !winding_nb)
+                 then
+                  let e1 = List.nth aet ((i + 1) mod aet_len) in
+                  for
+                    i = int_of_float e0.xstart + 1 to int_of_float e1.xstart
+                  do
                     f (float_of_int i) y
                   done);
 
-                 (y0, x0 +. slope, ymax, slope))
+                 { e0 with xstart = e0.xstart +. e0.slope })
         in
         loop (y +. 1.) aet et
     in
@@ -285,15 +282,11 @@ module Filler = struct
           and ymax = max y0 y1
           and slope = (x0 -. x1) /. (y0 -. y1) in
 
-          (ymin, xstart, ymax, slope))
-      |> List.fast_sort (fun (y0, _, _, _) (y1, _, _, _) -> Float.compare y0 y1)
-      |> List.filter (fun (_, _, _, s) -> not (Float.is_infinite s))
+          { ymin; xstart; ymax; slope; direction = (if y1 > y0 then 1 else -1) })
+      |> List.fast_sort (fun e0 e1 -> Float.compare e0.ymin e1.ymin)
+      |> List.filter (fun e -> not (Float.is_infinite e.slope))
     in
-    let y, _, _, _ = List.hd et in
-    loop ~start:true y [] et
-
-  (** [non_zero x y poly] is the implementation of the non-zero rule algorithm. *)
-  let non_zero (x : int) (y : int) (poly : p2 array) : bool = failwith "TODO"
+    loop ~start:true (List.hd et).ymin [] et
 end
 
 module Make (Bitmap : BitmapType) = struct
@@ -525,7 +518,7 @@ module Make (Bitmap : BitmapType) = struct
 
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
   let r_stroke (s : state) : unit =
-    ignore (r_path s |> List.iter (draw_point s s.gstate.g_stroke))
+    r_path s |> List.iter (draw_point s s.gstate.g_stroke)
 
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r].
@@ -534,21 +527,17 @@ module Make (Bitmap : BitmapType) = struct
   let r_fill (r : [< `Aeo | `Anz ]) (s : state) : unit =
     let c = s.gstate.g_fill in
     if Color.void <> c then
-      let pts =
-        s.path
-        |> List.fold_left
-             (fun acc sp ->
-               (sp.segs
-               |> List.map (fun pt ->
-                      let x, y = get_scaled_coords s (P2.x pt) (P2.y pt) in
-                      P2.v x y))
-               @ acc)
-             []
-        |> Array.of_list
-      in
-      match r with
-      | `Anz -> failwith "TODO: implement the non-zero filling rule."
-      | `Aeo -> Filler.scanline (fun x y -> draw_point s c (P2.v x y)) pts
+      s.path
+      |> List.fold_left
+           (fun acc sp ->
+             (sp.segs
+             |> List.mapi (fun i pt ->
+                    let x, y = get_scaled_coords s (P2.x pt) (P2.y pt) in
+                    P2.v x y))
+             @ acc)
+           []
+      |> Array.of_list
+      |> Filler.scanline r (fun x y -> draw_point s c (P2.v x y))
 
   (** [r_cut s a] renders a cut image. *)
   let rec r_cut (s : state) (a : P.area) : Pv.Data.image -> unit = function
