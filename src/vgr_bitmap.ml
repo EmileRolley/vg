@@ -219,37 +219,65 @@ module Filler = struct
     direction : int;
   }
 
+  (** [update_tables y et aet] updates the edge table and the active edge table
+      according the given current [y]-value. *)
+  let update_tables (y : float) (et : edge list) (aet : edge list) :
+      edge list * edge list =
+    let to_move = ref [] in
+    let et =
+      et
+      |> List.filter (fun e ->
+             if y = e.ymin then (
+               to_move := e :: !to_move;
+               false)
+             else true)
+    and aet =
+      aet
+      |> List.append !to_move
+      |> List.filter (fun e -> y <> e.ymax)
+      |> List.fast_sort (fun e0 e1 -> Float.compare e0.xstart e1.xstart)
+    in
+    (et, aet)
+
+  (** [create_edge_table poly] returns the initialized edge table. *)
+  let create_edge_table (poly : p2 list list) : edge list =
+    poly
+    |> List.fold_left
+         (fun acc sp ->
+           let sp_len = List.length sp in
+           List.init sp_len (fun i ->
+               let curr = List.nth sp i in
+               let next = List.nth sp ((i + 1) mod sp_len) in
+               let x0, y0, x1, y1 = P2.(x curr, y curr, x next, y next) in
+               let ymin, xstart = if y0 < y1 then (y0, x0) else (y1, x1)
+               and ymax = max y0 y1
+               and slope = (x0 -. x1) /. (y0 -. y1) in
+               {
+                 ymin;
+                 xstart;
+                 ymax;
+                 slope;
+                 direction = (if y1 > y0 then 1 else -1);
+               })
+           @ acc)
+         []
+    |> List.filter (fun e -> not (Float.is_infinite e.slope))
+    |> List.fast_sort (fun e0 e1 -> Float.compare e0.ymin e1.ymin)
+
   (** [scanline r f poly] is an implementation of the scanline rendering
-      algorithm. It apply the [f] function to each points of each crossing
-      lines.
+      algorithm. It apply the [f] function to each points of each crossing lines
+      accoriding the given rule [r].
 
-      FIXME: I think the filling could be more precise.
-
-      FIXME: need to manage properly intricated paths. *)
+      NOTE: could the filling be more precise? *)
   let scanline
-      (r : [ `Anz | `Aeo ]) (f : float -> float -> unit) (poly : p2 array) :
+      (r : [ `Anz | `Aeo ]) (f : float -> float -> unit) (poly : p2 list list) :
       unit =
-    let rec loop ?(start = false) y aet et =
+    let rec scan ?(start = false) y aet et =
       (* Iterates over each lines of the path. *)
       if start || 0 <> List.length aet || 0 <> List.length et then
-        (* Updates the edge table and the active edge table. *)
-        let to_move = ref [] in
-        let et =
-          et
-          |> List.filter (fun e ->
-                 if y = e.ymin then (
-                   to_move := e :: !to_move;
-                   false)
-                 else true)
-        and aet =
-          aet
-          |> List.append !to_move
-          |> List.filter (fun e -> y <> e.ymax)
-          |> List.fast_sort (fun e0 e1 -> Float.compare e0.xstart e1.xstart)
-        in
-
+        let et, aet = update_tables y et aet in
         (* Applies [f] to each points inside the path on the current crossing
-           line and updates the [x] value. *)
+           line and updates the [xstart] value. *)
         let aet_len = List.length aet in
         let winding_nb =
           ref (List.fold_left (fun acc e -> acc + e.direction) 0 aet)
@@ -269,24 +297,11 @@ module Filler = struct
 
                  { e0 with xstart = e0.xstart +. e0.slope })
         in
-        loop (y +. 1.) aet et
+        scan (y +. 1.) aet et
     in
 
-    (* Initializes the edge table. *)
-    let poly_len = Array.length poly in
-    let et =
-      List.init poly_len (fun i ->
-          let curr = poly.(i) and next = poly.((i + 1) mod poly_len) in
-          let x0, y0, x1, y1 = P2.(x curr, y curr, x next, y next) in
-          let ymin, xstart = if y0 < y1 then (y0, x0) else (y1, x1)
-          and ymax = max y0 y1
-          and slope = (x0 -. x1) /. (y0 -. y1) in
-
-          { ymin; xstart; ymax; slope; direction = (if y1 > y0 then 1 else -1) })
-      |> List.fast_sort (fun e0 e1 -> Float.compare e0.ymin e1.ymin)
-      |> List.filter (fun e -> not (Float.is_infinite e.slope))
-    in
-    loop ~start:true (List.hd et).ymin [] et
+    let et = create_edge_table poly in
+    scan ~start:true (List.hd et).ymin [] et
 end
 
 module Make (Bitmap : BitmapType) = struct
@@ -534,9 +549,8 @@ module Make (Bitmap : BitmapType) = struct
              |> List.mapi (fun i pt ->
                     let x, y = get_scaled_coords s (P2.x pt) (P2.y pt) in
                     P2.v x y))
-             @ acc)
+             :: acc)
            []
-      |> Array.of_list
       |> Filler.scanline r (fun x y -> draw_point s c (P2.v x y))
 
   (** [r_cut s a] renders a cut image. *)
