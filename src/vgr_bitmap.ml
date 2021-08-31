@@ -345,8 +345,6 @@ module Make (Bitmap : BitmapType) = struct
     bitmap : bitmap;
     (* Current path being built. *)
     size : size2;
-    (* Constant used to convert Vg point coordinates into rasterized ones. *)
-    scaling : float;
     (* Points of the current path being calculated. *)
     mutable path : subpath list;
     (* Current cursor position. *)
@@ -379,11 +377,19 @@ module Make (Bitmap : BitmapType) = struct
   let get_curr_int_coords (s : state) : int * int =
     to_int_coords (P2.x s.curr) (P2.y s.curr)
 
+  (* TODO: should not be only scaled coords. *)
   let get_scaled_coords (s : state) (x : float) (y : float) : float * float =
-    (Float.round (s.scaling *. x), Float.round (s.scaling *. y))
+    let m = M3.mul (M3.v x y 1. 0. 0. 0. 0. 0. 0.) s.gstate.g_tr in
+    let x, y =
+      ( Float.round (M3.e00 m),
+        (* y-flip *)
+        Float.round (M3.e11 s.gstate.g_tr -. M3.e01 m) )
+    in
+    (x, y)
 
   let get_int_scaled_coords (s : state) (x : float) (y : float) : int * int =
-    to_int_coords (s.scaling *. x) (s.scaling *. y)
+    let x, y = get_scaled_coords s x y in
+    to_int_coords x y
 
   (* Render functions.
 
@@ -490,10 +496,7 @@ module Make (Bitmap : BitmapType) = struct
 
   (** [is_in_view s x y] for now, verifies that (x, y) are valid coordinates for
       the [s.bitmap]. TODO: need to find out how to manage the [view] and the
-      [size].
-
-      PERF: This test should be done before adding points the [s.path] instead
-      of checking before drawing. => less memory usage. *)
+      [size]. *)
   let is_in_view (s : state) (x : float) (y : float) : bool =
     let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
     x >= 0. && x < w && y >= 0. && y < h
@@ -607,12 +610,14 @@ module Make (Bitmap : BitmapType) = struct
   (** [create_state b s v r] creates a initial state. *)
   let create_state (b : bitmap) (s : size2) (v : box2) (r : Pv.renderer) : state
       =
+    let init_tr =
+      let w, h = to_float_coords (B.w b) (B.h b) in
+      M3.scale3 (P3.v w h 1.)
+    in
     {
       r;
       view = v;
       bitmap = b;
-      (* FIXME: this must be replaced by a transformation matrix. *)
-      scaling = B.h b |> float_of_int;
       size = s;
       path = [];
       curr = P2.o;
@@ -620,7 +625,7 @@ module Make (Bitmap : BitmapType) = struct
       todo = [];
       gstate =
         {
-          g_tr = M3.id;
+          g_tr = init_tr;
           g_outline = P.o;
           g_stroke = Color.void;
           g_fill = Color.void;
