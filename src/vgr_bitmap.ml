@@ -73,15 +73,8 @@ end
 module type S = sig
   type bitmap
 
-  val target : bitmap -> [ `Other ] Vg.Vgr.target
+  val target : bitmap -> float -> [ `Other ] Vg.Vgr.target
 end
-
-(* TODO: find a better location. *)
-let to_int_coords (x : float) (y : float) : int * int =
-  (int_of_float x, int_of_float y)
-
-let to_float_coords (x : int) (y : int) : float * float =
-  (float_of_int x, float_of_int y)
 
 (** Extends the [Box2] module by adding convenient functions. *)
 module Box2 = struct
@@ -374,22 +367,20 @@ module Make (Bitmap : BitmapType) = struct
 
   (* Convenient functions for coordinate conversions. *)
 
+  let to_int_coords ((x, y) : float * float) : int * int =
+    (int_of_float x, int_of_float y)
+
+  let to_float_coords ((x, y) : int * int) : float * float =
+    (float_of_int x, float_of_int y)
+
   let get_curr_int_coords (s : state) : int * int =
-    to_int_coords (P2.x s.curr) (P2.y s.curr)
+    to_int_coords P2.(x s.curr, y s.curr)
 
-  (* TODO: should not be only scaled coords. *)
-  let get_scaled_coords (s : state) (x : float) (y : float) : float * float =
+  (** [get_real_coords s x y] returns the corresponding coordinate of the
+      normalized ([x], [y]). *)
+  let get_real_coords (s : state) ((x, y) : float * float) : float * float =
     let m = M3.mul (M3.v x y 1. 0. 0. 0. 0. 0. 0.) s.gstate.g_tr in
-    let x, y =
-      ( Float.round (M3.e00 m),
-        (* y-flip *)
-        Float.round (M3.e11 s.gstate.g_tr -. M3.e01 m) )
-    in
-    (x, y)
-
-  let get_int_scaled_coords (s : state) (x : float) (y : float) : int * int =
-    let x, y = get_scaled_coords s x y in
-    to_int_coords x y
+    (Float.round (M3.e00 m), Float.round (M3.e01 m))
 
   (* Render functions.
 
@@ -498,7 +489,7 @@ module Make (Bitmap : BitmapType) = struct
       the [s.bitmap]. TODO: need to find out how to manage the [view] and the
       [size]. *)
   let is_in_view (s : state) (x : float) (y : float) : bool =
-    let w, h = to_float_coords (B.w s.bitmap) (B.h s.bitmap) in
+    let w, h = to_float_coords B.(w s.bitmap, h s.bitmap) in
     x >= 0. && x < w && y >= 0. && y < h
 
   (** [r_path s] returns all points of the current path (which must only be
@@ -509,7 +500,7 @@ module Make (Bitmap : BitmapType) = struct
         let x, y =
           (* Invariant: for each new sub-paths, [subpath.start] is necessarily not [None]. *)
           let start = Option.get sp.start in
-          get_scaled_coords s (P2.x start) (P2.y start)
+          get_real_coords s P2.(x start, y start)
         in
         P2.v x y
       in
@@ -517,10 +508,10 @@ module Make (Bitmap : BitmapType) = struct
         sp.segs
         |> List.fold_left
              (fun (i, prev, pts) pt ->
-               let x, y = (P2.x pt, P2.y pt) in
-               let x0, y0 = to_int_coords (P2.x prev) (P2.y prev) in
-               let x1, y1 = get_scaled_coords s x y in
-               let x1', y1' = to_int_coords x1 y1 in
+               let x, y = P2.(x pt, y pt) in
+               let x0, y0 = to_int_coords P2.(x prev, y prev) in
+               let x1, y1 = get_real_coords s (x, y) in
+               let x1', y1' = to_int_coords (x1, y1) in
                s.curr <- P2.v x1 y1;
                (i + 1, P2.v x1 y1, Stroker.bresenham_line x0 y0 x1' y1' @ pts))
              (0, start, [])
@@ -538,6 +529,14 @@ module Make (Bitmap : BitmapType) = struct
   let r_stroke (s : state) : unit =
     r_path s |> List.iter (draw_point s s.gstate.g_stroke)
 
+  (** [push_transform s tr] updates the current transformation matrix by
+      applying the transformation [tr]. *)
+  let push_transform (s : state) (tr : Pv.Data.tr) : unit =
+    let m =
+      match tr with Pv.Data.Scale sv -> M3.scale2 sv | _ -> failwith "TODO"
+    in
+    s.gstate.g_tr <- M3.mul m s.gstate.g_tr
+
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r].
 
@@ -550,7 +549,7 @@ module Make (Bitmap : BitmapType) = struct
            (fun acc sp ->
              (sp.segs
              |> List.mapi (fun i pt ->
-                    let x, y = get_scaled_coords s (P2.x pt) (P2.y pt) in
+                    let x, y = get_real_coords s P2.(x pt, y pt) in
                     P2.v x y))
              :: acc)
            []
@@ -601,18 +600,22 @@ module Make (Bitmap : BitmapType) = struct
               (* NOTE: seems like this operation is avoided. *)
               s.todo <- Draw i' :: Draw i :: todo;
               r_image s k r
-          | Tr (_tr, i) ->
+          | Tr (tr, i) ->
               s.todo <- Draw i :: todo;
               D.pp_img i;
-              (* warn s (`Other "TODO: support transformations."); *)
+              push_transform s tr;
               r_image s k r)
 
   (** [create_state b s v r] creates a initial state. *)
-  let create_state (b : bitmap) (s : size2) (v : box2) (r : Pv.renderer) : state
-      =
+  let create_state
+      (b : bitmap) (res : float) (s : size2) (v : box2) (r : Pv.renderer) :
+      state =
     let init_tr =
-      let w, h = to_float_coords (B.w b) (B.h b) in
-      M3.scale3 (P3.v w h 1.)
+      let sx = Size2.w s /. Box2.w v in
+      let sy = Size2.h s /. Box2.h v in
+      let dx = -.Box2.ox v *. sx in
+      let dy = Size2.h s +. (Box2.oy v *. sy) in
+      M3.v sx 0. 0. 0. (-.sy) 0. dx dy 0. |> M3.map (fun e -> res *. e)
     in
     {
       r;
@@ -632,20 +635,21 @@ module Make (Bitmap : BitmapType) = struct
         };
     }
 
-  let render_target (bitmap : bitmap) (_ : Pv.renderer) (_ : [< dst ]) :
+  let render_target
+      (bitmap : bitmap) (res : float) (_ : Pv.renderer) (_ : [< dst ]) :
       bool * Pv.render_fun =
     let render v k r =
       match v with
       | `End -> k r
       | `Image (size, view, i) ->
           D.pp_img i;
-          let s = create_state bitmap size view r in
+          let s = create_state bitmap res size view r in
           s.todo <- [ Draw i ];
           r_image s k r
     in
     (false, render)
 
-  let target bitmap = Pv.create_target (render_target bitmap)
+  let target bitmap res = Pv.create_target (render_target bitmap res)
 end
 
 (*---------------------------------------------------------------------------

@@ -62,7 +62,7 @@ module F32_ba : BitmapType
 module type S = sig
   type bitmap
 
-  val target : bitmap -> [ `Other ] Vg.Vgr.target
+  val target : bitmap -> float -> [ `Other ] Vg.Vgr.target
   (** [target state]. *)
 end
 
