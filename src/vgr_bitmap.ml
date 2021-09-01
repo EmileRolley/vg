@@ -360,6 +360,8 @@ module Make (Bitmap : BitmapType) = struct
 
   let image i = Vgr.Private.I.of_data i
 
+  let save_gstate s = Set { s.gstate with g_tr = s.gstate.g_tr }
+
   (** image view rect in current coordinate system. *)
   let view_rect s =
     let tr = M3.inv s.gstate.g_tr in
@@ -379,8 +381,8 @@ module Make (Bitmap : BitmapType) = struct
   (** [get_real_coords s x y] returns the corresponding coordinate of the
       normalized ([x], [y]). *)
   let get_real_coords (s : state) ((x, y) : float * float) : float * float =
-    let m = M3.mul (M3.v x y 1. 0. 0. 0. 0. 0. 0.) s.gstate.g_tr in
-    (Float.round (M3.e00 m), Float.round (M3.e01 m))
+    let m = M3.mul s.gstate.g_tr (M3.v x 0. 0. y 0. 0. 1. 0. 0.) in
+    (Float.round (M3.e00 m), Float.round (M3.e10 m))
 
   (* Render functions.
 
@@ -533,9 +535,13 @@ module Make (Bitmap : BitmapType) = struct
       applying the transformation [tr]. *)
   let push_transform (s : state) (tr : Pv.Data.tr) : unit =
     let m =
-      match tr with Pv.Data.Scale sv -> M3.scale2 sv | _ -> failwith "TODO"
+      match tr with
+      | Pv.Data.Move v -> M3.move2 v
+      | Pv.Data.Rot a -> M3.rot2 a
+      | Pv.Data.Scale sv -> M3.scale2 sv
+      | Pv.Data.Matrix m -> m
     in
-    s.gstate.g_tr <- M3.mul m s.gstate.g_tr
+    s.gstate.g_tr <- M3.mul s.gstate.g_tr m
 
   (** [r_fill r s] fills all the points inside [s.path] according to the given
       filling rule [r].
@@ -578,7 +584,10 @@ module Make (Bitmap : BitmapType) = struct
     else
       match s.todo with
       | [] -> k r
-      | Set _gs :: _todo -> failwith "TODO"
+      | Set gs :: todo ->
+          s.gstate <- gs;
+          s.todo <- todo;
+          r_image s k r
       | Draw i :: todo -> (
           s.cost <- s.cost + 1;
           match i with
@@ -601,8 +610,7 @@ module Make (Bitmap : BitmapType) = struct
               s.todo <- Draw i' :: Draw i :: todo;
               r_image s k r
           | Tr (tr, i) ->
-              s.todo <- Draw i :: todo;
-              D.pp_img i;
+              s.todo <- Draw i :: save_gstate s :: todo;
               push_transform s tr;
               r_image s k r)
 
@@ -615,7 +623,7 @@ module Make (Bitmap : BitmapType) = struct
       let sy = Size2.h s /. Box2.h v in
       let dx = -.Box2.ox v *. sx in
       let dy = Size2.h s +. (Box2.oy v *. sy) in
-      M3.v sx 0. 0. 0. (-.sy) 0. dx dy 0. |> M3.map (fun e -> res *. e)
+      M3.v sx 0. dx 0. (-.sy) dy 0. 0. 1. |> M3.map (fun e -> res *. e)
     in
     {
       r;
