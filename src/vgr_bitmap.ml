@@ -58,7 +58,7 @@ module F32_ba : BitmapType = struct
 
   let create w h =
     let ba = Ba.create Ba.Float32 (w * h * stride) in
-    Ba.fill ba 1.;
+    Ba.fill ba 0.;
     (ba, w, h)
 
   let get (b, _, h) x y = Ba.get_v4 b (get_i x y h)
@@ -125,6 +125,84 @@ module Stroker = struct
         loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
     in
     loop [] x0 y0 err
+
+  (** FIXME:*)
+  let rec xiaolin_wu_line (x0 : float) (y0 : float) (x1 : float) (y1 : float) :
+      (p2 * float) list =
+    let open Float in
+    let ipart x = floor x in
+    let fpart x = x -. floor x in
+    let rfpart x = 1. -. fpart x in
+
+    let steep = abs (y1 -. y0) > abs (x1 -. x0) in
+
+    if steep then xiaolin_wu_line y0 x0 y1 x1
+    else if x0 > x1 then xiaolin_wu_line x1 y1 x0 y0
+    else
+      let dx = x1 -. x0 and dy = y1 -. y0 in
+      let gradient = if 0. = dx then 1. else dy /. dx in
+
+      (* Handles the first endpoint. *)
+      let xend = round x0 in
+      let yend = y0 +. (gradient *. (xend -. x0)) in
+      let xgap = rfpart (x0 +. 0.5) in
+      let xpxl1 = xend in
+      let ypxl1 = ipart yend in
+      let pts_to_draw =
+        if steep then
+          [
+            (P2.(v ypxl1 xpxl1), rfpart yend *. xgap);
+            (P2.(v (ypxl1 +. 1.) xpxl1), fpart yend *. xgap);
+          ]
+        else
+          [
+            (P2.(v xpxl1 ypxl1), rfpart yend *. xgap);
+            (P2.(v xpxl1 (ypxl1 +. 1.)), fpart yend *. xgap);
+          ]
+      in
+
+      (* First y-intersection for the main loop. *)
+      let intery = yend +. gradient in
+
+      (* Handles the second endpoint. *)
+      let xend = round x1 in
+      let yend = y1 +. (gradient *. (xend -. x1)) in
+      let xgap = rfpart (x1 +. 0.5) in
+      let xpxl2 = xend in
+      let ypxl2 = ipart yend in
+      let pts_to_draw =
+        pts_to_draw
+        @
+        if steep then
+          [
+            (P2.(v ypxl2 xpxl2), rfpart yend *. xgap);
+            (P2.(v (ypxl2 +. 1.) xpxl2), fpart yend *. xgap);
+          ]
+        else
+          [
+            (P2.(v xpxl2 ypxl2), rfpart yend *. xgap);
+            (P2.(v xpxl2 (ypxl2 +. 1.)), fpart yend *. xgap);
+          ]
+      in
+
+      (* Main loop *)
+      let rec loop intery (x : float) acc =
+        if x >= xpxl2 then acc
+        else
+          (if steep then
+           [
+             (P2.v (ipart intery) x, rfpart intery);
+             (P2.v (ipart intery +. 1.) x, fpart intery);
+           ]
+          else
+            [
+              (P2.v x (ipart intery), rfpart intery);
+              (P2.v x (ipart intery +. 1.), fpart intery);
+            ])
+          |> List.append acc
+          |> loop (intery +. gradient) (x +. 1.)
+      in
+      loop intery (xpxl1 +. 1.) pts_to_draw
 
   (** [cubic_bezier ?nb_line p1x p1y c1x c1y c2x c2y p2x p2y] returns all the
       coordinates of lines approaching the Bézier curve.
@@ -522,6 +600,31 @@ module Make (Bitmap : BitmapType) = struct
     in
     List.fold_left (fun acc sp -> r_subpath sp @ acc) [] s.path
 
+  let r_path' (s : state) : (p2 * float) list =
+    let r_subpath sp =
+      let start =
+        let x, y =
+          (* Invariant: for each new sub-paths, [subpath.start] is necessarily not [None]. *)
+          let start = Option.get sp.start in
+          get_real_coords s P2.(x start, y start)
+        in
+        P2.v x y
+      in
+      let _, _, pts =
+        sp.segs
+        |> List.fold_left
+             (fun (i, prev, pts) pt ->
+               let x, y = P2.(x pt, y pt) in
+               let x0, y0 = P2.(x prev, y prev) in
+               let x1, y1 = get_real_coords s (x, y) in
+               s.curr <- P2.v x1 y1;
+               (i + 1, P2.v x1 y1, Stroker.xiaolin_wu_line x0 y0 x1 y1 @ pts))
+             (0, start, [])
+      in
+      pts
+    in
+    List.fold_left (fun acc sp -> r_subpath sp @ acc) [] s.path
+
   (** [draw_point s c pt] draw the corresponding element of [pt] in [s.bitmap]. *)
   let draw_point (s : state) (c : color) (pt : p2) : unit =
     let x = P2.x pt and y = P2.y pt in
@@ -530,6 +633,13 @@ module Make (Bitmap : BitmapType) = struct
   (** [stroke s] fills the [s.bitmap] according to the current [s.gstate]. *)
   let r_stroke (s : state) : unit =
     r_path s |> List.iter (draw_point s s.gstate.g_stroke)
+
+  let r_stroke' (s : state) : unit =
+    r_path' s
+    |> List.iter (fun (pt, alpha) ->
+           let c = s.gstate.g_stroke in
+           D.log ~s:"ALPHA" @@ D.spf "%f" alpha;
+           draw_point s Color.(v_srgb (r c) (g c) (b c) ~a:alpha) pt)
 
   (** [push_transform s tr] updates the current transformation matrix by
       applying the transformation [tr]. *)
@@ -569,7 +679,7 @@ module Make (Bitmap : BitmapType) = struct
         | `O o ->
             s.gstate.g_outline <- o;
             set_stroke s p;
-            r_stroke s
+            r_stroke' s
         | (`Anz | `Aeo) as a ->
             set_fill s p;
             r_fill a s)
