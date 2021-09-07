@@ -530,6 +530,7 @@ module Make (Bitmap : BitmapType) = struct
   (** [set_path s p] calculates points to draw according to a given [p]. *)
   let set_path (s : state) (p : Pv.Data.path) : unit =
     let open P2 in
+    s.path <- [];
     p
     |> List.rev
     |> List.iter (function
@@ -679,10 +680,14 @@ module Make (Bitmap : BitmapType) = struct
         | `O o ->
             s.gstate.g_outline <- o;
             set_stroke s p;
-            r_stroke' s
+            r_stroke s
         | (`Anz | `Aeo) as a ->
             set_fill s p;
             r_fill a s)
+    | Tr (tr, i) ->
+        s.todo <- save_gstate s :: s.todo;
+        push_transform s tr;
+        r_cut s a i
     | _ -> failwith "TODO"
 
   (** [r_image s k r] renders a Vg image. *)
@@ -760,7 +765,7 @@ module Make (Bitmap : BitmapType) = struct
       match v with
       | `End -> k r
       | `Image (size, view, i) ->
-          D.pp_img i;
+          (* D.pp_img i; *)
           let s = create_state bitmap res size view r in
           s.todo <- [ Draw i ];
           r_image s k r
