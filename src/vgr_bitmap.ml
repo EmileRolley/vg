@@ -107,12 +107,31 @@ module Stroker = struct
 
       The Bresenham's line algorithm is used (see
       https://en.wikipedia.org/wiki/Bresenham's_line_algorithm) *)
-  let bresenham_line (x0 : int) (y0 : int) (x1 : int) (y1 : int) : p2 list =
+  let bresenham_line (x0 : int) (y0 : int) (x1 : int) (y1 : int) (w : int) :
+      p2 list =
     let dx = abs (x1 - x0)
     and sx = if x0 < x1 then 1 else -1
     and dy = -1 * abs (y1 - y0)
-    and sy = if y0 < y1 then 1 else -1 in
+    and sy = if y0 < y1 then 1 else -1
+    and is_horizontal = y0 = y1 in
     let err = dx + dy in
+
+    let width_line x y =
+      let calculate (x : int) (y : int) : p2 list =
+        let x_start = x - (w / 2) in
+        let x_stop = x + (w / 2) in
+        let rec loop acc x =
+          let acc =
+            (if is_horizontal then P2.v (float_of_int y) (float_of_int x)
+            else P2.v (float_of_int x) (float_of_int y))
+            :: acc
+          in
+          if x_stop = x then acc else loop acc (x + 1)
+        in
+        loop [] x_start
+      in
+      if is_horizontal then calculate y x else calculate x y
+    in
 
     let rec loop pts x y err =
       if x = x1 && y = y1 then pts
@@ -122,7 +141,7 @@ module Stroker = struct
         let x = if e2 >= dy then x + sx else x in
         let err = if e2 <= dx then err + dx else err in
         let y = if e2 <= dx then y + sy else y in
-        loop (P2.v (float_of_int x) (float_of_int y) :: pts) x y err
+        loop (width_line x y @ pts) x y err
     in
     loop [] x0 y0 err
 
@@ -593,8 +612,14 @@ module Make (Bitmap : BitmapType) = struct
                let x0, y0 = to_int_coords P2.(x prev, y prev) in
                let x1, y1 = get_real_coords s (x, y) in
                let x1', y1' = to_int_coords (x1, y1) in
+               let width, _ =
+                 get_real_coords s (s.gstate.g_outline.width, 1.)
+                 |> to_int_coords
+               in
                s.curr <- P2.v x1 y1;
-               (i + 1, P2.v x1 y1, Stroker.bresenham_line x0 y0 x1' y1' @ pts))
+               ( i + 1,
+                 P2.v x1 y1,
+                 Stroker.bresenham_line x0 y0 x1' y1' width @ pts ))
              (0, start, [])
       in
       pts
