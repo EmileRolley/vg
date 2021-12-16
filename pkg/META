@@ -20,7 +20,7 @@ package "svg" (
 package "bitmap" (
   version = "%%VERSION%%"
   description = "Vg bitmap renderer"
-  requires = "vg"
+  requires = "vg landmarks"
   archive(byte) = "vgr_bitmap.cma"
   archive(native) = "vgr_bitmap.cmxa"
   plugin(byte) = "vgr_bitmap.cma"

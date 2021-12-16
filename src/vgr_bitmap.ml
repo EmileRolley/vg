@@ -145,6 +145,69 @@ module Stroker = struct
     in
     loop [] x0 y0 err
 
+  let line_width (x0 : int) (y0 : int) (x1 : int) (y1 : int) (width : float) :
+      (p2 * float) list =
+    let dx = abs (x1 - x0)
+    and sx = if x0 < x1 then 1 else -1
+    and dy = abs (y1 - y0)
+    and sy = if y0 < y1 then 1 else -1 in
+    let err = ref (dx - dy)
+    and ed =
+      if dx + dy = 0 then 1. else sqrt (float_of_int ((dx * dx) + (dy * dy)))
+    and x0, y0, e2, x2, y2, pxs, break =
+      (ref x0, ref y0, ref 0, ref 0, ref 0, ref [], ref false)
+    in
+
+    D.log
+    @@ D.spf "width = %f, (width +. 1.) /. 2. = %f" width ((width +. 1.) /. 2.);
+
+    while not !break do
+      pxs :=
+        ( P2.v (float_of_int !x0) (float_of_int !y0),
+          max 0.
+            (255.
+            *. (Float.abs (float_of_int (!err - dx + dy)) /. (ed -. width +. 1.))
+            ) )
+        :: !pxs;
+      e2 := !err;
+      x2 := !x0;
+      if 2 * !e2 >= -dx then (
+        e2 := !e2 + dy;
+        y2 := !y0;
+        while float_of_int !e2 < ed *. width && (y1 <> !y2 || dx > dy) do
+          y2 := !y2 + sy;
+          pxs :=
+            ( P2.v (float_of_int !x0) (float_of_int !y2),
+              max 0.
+                (255.
+                *. (Float.abs (float_of_int (!err - dx + dy))
+                   /. (ed -. width +. 1.))) )
+            :: !pxs;
+          e2 := !e2 + dx
+        done;
+        if !x0 = x1 then break := true;
+        e2 := !err;
+        err := !err - dy;
+        x0 := !x0 + sx);
+      if (not !break) && 2 * !e2 <= dy then (
+        e2 := dx - !e2;
+        while float_of_int !e2 < ed *. width && (x1 <> !x2 || dx < dy) do
+          x2 := !x2 + sx;
+          pxs :=
+            ( P2.v (float_of_int !x2) (float_of_int !y0),
+              max 0.
+                (255.
+                *. (Float.abs (float_of_int (!err - dx + dy))
+                   /. (ed -. width +. 1.))) )
+            :: !pxs;
+          e2 := !e2 + dy
+        done;
+        if !y0 = y1 then break := true;
+        err := !err + dx;
+        y0 := !y0 + sy)
+    done;
+    !pxs
+
   (** FIXME:*)
   let rec xiaolin_wu_line (x0 : float) (y0 : float) (x1 : float) (y1 : float) :
       (p2 * float) list =
@@ -285,6 +348,146 @@ module Stroker = struct
         loop (P2.v x y :: acc) (t +. 1.)
     in
     loop [] 0.
+
+  (** [arc_to_bezier px py cx cy rx ry angle large sweep] returns all the
+      coordinates of lines approaching the curve using cubic Bézier curves. *)
+  let arc_to_bezier
+      (px : float)
+      (py : float)
+      (cx : float)
+      (cy : float)
+      (rx : float)
+      (ry : float)
+      (angle : float)
+      (large : bool)
+      (sweep : bool) : 'a =
+    let tau = Float.pi *. 2. in
+
+    let vector_angle ux uy vx vy =
+      let sign = if 0. > (ux *. vy) -. (uy *. vx) then -1. else 1. in
+
+      let dot =
+        let d = (ux *. vx) +. (uy *. vy) in
+        if 1. > d then 1. else if -1. > d then -1. else d
+      in
+
+      sign *. Float.acos dot
+    in
+
+    let get_arc_center sin_phi cos_phi pxp pyp =
+      let rxsq = Float.pow rx 2.
+      and rysq = Float.pow ry 2.
+      and pxpsq = Float.pow pxp 2.
+      and pypsq = Float.pow pyp 2. in
+
+      let radicant =
+        let r = (rxsq *. rysq) -. (rxsq *. pypsq) -. (rysq *. pxpsq) in
+        let r = if 0. > r then 0. else r in
+        let r = (r /. (rxsq *. pypsq)) +. (rysq *. pxpsq) in
+        Float.sqrt r *. if large = sweep then -1. else 1.
+      in
+
+      let center_rxp = radicant *. rx /. ry *. pyp
+      and center_ryp = radicant *. -.ry /. rx *. pxp in
+
+      let center_x =
+        (cos_phi *. center_rxp) -. (sin_phi *. center_ryp) +. ((px +. cx) /. 2.)
+      and center_y =
+        (sin_phi *. center_ryp) +. (cos_phi *. center_ryp) +. ((py +. cy) /. 2.)
+      in
+
+      let v_x1 = (pxp -. center_rxp) /. rx
+      and v_y1 = (pyp -. center_ryp) /. ry
+      and v_x2 = (-.pxp -. center_rxp) /. rx
+      and v_y2 = (-.pyp -. center_ryp) /. ry in
+
+      let a1 = vector_angle 1. 0. v_x1 v_y1
+      and a2 =
+        let a = vector_angle v_x1 v_y1 v_x2 v_y2 in
+        if (not sweep) && 0. < a then a -. tau
+        else if sweep && 0. < a then a +. tau
+        else a
+      in
+
+      (center_x, center_y, a1, a2)
+    in
+
+    let approx_unit_arc a1 a2 =
+      let c1 = 1.570_796_326_794_896_6 and c2 = 0.551_915_024_494 in
+      let a =
+        if c1 = a2 then c2
+        else if -.c1 = a2 then -.c2
+        else 4. /. 3. *. Float.tan (a2 /. 4.)
+      in
+
+      let x1 = Float.cos a1
+      and y1 = Float.sin a1
+      and x2 = Float.cos (a1 +. a2)
+      and y2 = Float.sin (a1 +. a2) in
+
+      ( (x1 -. (y1 *. a), y1 +. (x1 *. a)),
+        (x2 +. (y2 *. a), y2 -. (x2 *. a)),
+        (x2, y2) )
+    in
+
+    let map_to_ellipse (x, y) rx ry cos_phi sin_phi center_x center_y =
+      let x = x *. rx and y = y *. ry in
+
+      let xp = (cos_phi *. x) -. (sin_phi *. y)
+      and yp = (sin_phi *. x) +. (cos_phi *. y) in
+
+      (xp +. center_x, yp +. center_y)
+    in
+
+    if 0. = rx || 0. = ry then []
+    else
+      let curves = ref [] in
+      let sinphi = sin (angle *. tau /. 360.)
+      and cosphi = cos (angle *. tau /. 360.) in
+
+      let pxp = (cosphi *. (px -. cx) /. 2.) +. (sinphi *. (py -. cy) /. 2.)
+      and pyp =
+        (-.sinphi *. (px -. cx) /. 2.) +. (cosphi *. (py -. cy) /. 2.)
+      in
+
+      if 0. = pxp && 0. = pyp then []
+      else
+        let rx = Float.abs rx and ry = Float.abs ry in
+
+        let lambda =
+          Float.((pow pxp 2. /. pow rx 2.) +. (pow pyp 2. /. pow ry 2.))
+        in
+
+        let rx, ry =
+          if 1. < lambda then
+            let sqrt_lambda = Float.sqrt lambda in
+            (rx *. sqrt_lambda, ry *. sqrt_lambda)
+          else (rx, ry)
+        in
+
+        let center_x, center_y, a1, a2 = get_arc_center sinphi cosphi pxp pyp in
+
+        let ratio =
+          let r = Float.abs a2 /. (tau /. 4.) in
+          if 0.000_000_1 > Float.abs (1. -. r) then 1. else r
+        in
+
+        let segments = Float.max (Float.ceil ratio) 1. in
+
+        let a2 = a2 /. segments in
+
+        let a1 = ref a1 in
+        for i = 0 to int_of_float segments do
+          curves := approx_unit_arc !a1 a2 :: !curves;
+          a1 := !a1 +. a2
+        done;
+
+        !curves
+        |> List.map (fun (p0, p1, p2) ->
+               let map_to_ellipse p =
+                 map_to_ellipse p rx ry cosphi sinphi center_x center_y
+               in
+               (map_to_ellipse p0, map_to_ellipse p1, map_to_ellipse p2))
 end
 
 (** [Filler] contains all the implementation of algorithms needed to determines
@@ -559,18 +762,34 @@ module Make (Bitmap : BitmapType) = struct
          | `Ccurve (c, c', pt) ->
              bezier_curve_to s `Cubic (x c) (y c) ~c2x:(x c') ~c2y:(y c') (x pt)
                (y pt)
-         | `Earc (large, cw, r, a, pt) ->
-             (*( match Vgr.Private.P.earc_params last large cw r a pt with
-                     | None -> line_to (x pt) (y pt)
-                     | Some (c, m, a, a') ->
-                         (* This part needs to be developed. *)
-                         let s = save s in
-                         let c = V2.ltr (M2.inv m) c in
-                         M2.(transform s (e00 m) (e10 m) (e01 m) (e11 m) (0.) (0.)));
-                         arc s (x c) (y c) ~r:1.0 ~a1:a ~a2:a'
-                         |> restore
-                     )*)
-             ()
+         | `Earc (large, cw, r, a, pt) -> (
+             match Pv.P.earc_params s.curr large cw r a pt with
+             | None -> line_to s pt
+             | Some (c, m, a, a') ->
+                 (* This part needs to be developed. *)
+
+                 (* Cairo.save s.ctx; *)
+                 let g_tr_cpy = s.gstate.g_tr in
+                 let c = V2.ltr (M2.inv m) c in
+                 (* M2.( *)
+                 (*   Cairo.transform s.ctx *)
+                 (*     (cairo_matrix (e00 m) (e10 m) (e01 m) (e11 m) 0. 0.)); *)
+                 s.gstate.g_tr <-
+                   M3.mul s.gstate.g_tr
+                     M2.(M3.v (e00 m) (e10 m) 1. (e01 m) (e11 m) 1. 0. 0. 1.);
+
+                 (* FIXME: *)
+                 Stroker.arc_to_bezier (x s.curr) (y s.curr) (x c) (y c) a a' 0.
+                   cw large
+                 |> List.iter (fun ((c1x, c1y), (c2x, c2y), (ptx, pty)) ->
+                        bezier_curve_to s `Cubic c1x c1y ~c2x ~c2y ptx pty);
+                 s.gstate.g_tr <- g_tr_cpy
+                 (* let x, y = get_real_coords s P2.(x pt, y pt) in *)
+                 (* let x', y' = to_int_coords (x, y) in *)
+                 (* (1* let r, _ = get_real_coords s (r, r) in *1) *)
+                 (* s.curr <- P2.v x y; *)
+                 (* Stroker.circle x' y' (int_of_float 100.) |> add_path_points s *)
+                 (* failwith "TODO" *))
          | `Close -> close_path s)
 
   let get_primitive : Pv.Data.primitive -> color = function
@@ -641,10 +860,15 @@ module Make (Bitmap : BitmapType) = struct
         |> List.fold_left
              (fun (i, prev, pts) pt ->
                let x, y = P2.(x pt, y pt) in
-               let x0, y0 = P2.(x prev, y prev) in
+               let x0, y0 = to_int_coords P2.(x prev, y prev) in
                let x1, y1 = get_real_coords s (x, y) in
+               let x1', y1' = to_int_coords (x1, y1) in
+               let width, _ =
+                 get_real_coords s (s.gstate.g_outline.width, 1.)
+               in
+               D.log ~s:"WIDTH" @@ D.spf "%f" width;
                s.curr <- P2.v x1 y1;
-               (i + 1, P2.v x1 y1, Stroker.xiaolin_wu_line x0 y0 x1 y1 @ pts))
+               (i + 1, P2.v x1 y1, Stroker.line_width x0 y0 x1' y1' width @ pts))
              (0, start, [])
       in
       pts
@@ -665,7 +889,7 @@ module Make (Bitmap : BitmapType) = struct
     |> List.iter (fun (pt, alpha) ->
            let c = s.gstate.g_stroke in
            D.log ~s:"ALPHA" @@ D.spf "%f" alpha;
-           draw_point s Color.(v_srgb (r c) (g c) (b c) ~a:alpha) pt)
+           draw_point s Color.(v_srgb (r c) (g c) (b c) ~a:0.5) pt)
 
   (** [push_transform s tr] updates the current transformation matrix by
       applying the transformation [tr]. *)
